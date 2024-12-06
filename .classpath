@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="lib" path="D:/Aplicaciones/Desarrollo/Dropbox/private/jsch-0.1.55.jar"/>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+	<classpathentry combineaccessrules="false" kind="src" path="/adempiere_360"/>
+	<classpathentry combineaccessrules="false" kind="src" path="/OFB_360"/>
+	<classpathentry kind="lib" path="C:/Users/Fernando/Downloads/packages_OV.jar"/>
+	<classpathentry kind="output" path="bin"/>
+</classpath>
