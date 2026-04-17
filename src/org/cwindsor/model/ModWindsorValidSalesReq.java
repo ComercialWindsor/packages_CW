@@ -17,7 +17,9 @@
 package org.cwindsor.model;
 
 import java.math.BigDecimal;
+
 import org.compiere.model.MClient;
+import org.compiere.model.MProduct;
 import org.compiere.model.MRequisition;
 import org.compiere.model.MRequisitionLine;
 import org.compiere.model.ModelValidationEngine;
@@ -94,8 +96,8 @@ public class ModWindsorValidSalesReq implements ModelValidator
 					if(req.getAD_Client_ID() == 1000000)
 					{
 						qtyAvai= DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
-								//" qtyavailableofb(mp.M_Product_ID,1000001) FROM M_Product mp WHERE mp.M_Product_ID = "+oLine.getM_Product_ID());
-								" COALESCE ( "+
+								" qtyavailableopenvianum(mp.M_Product_ID) FROM M_Product mp WHERE mp.M_Product_ID = "+rLine.getM_Product_ID());
+						/*		" COALESCE ( "+
 							      "         (SELECT SUM (s.qtyonhand) "+
 							       "           FROM rv_storage s "+
 							        "         WHERE     s.M_Product_ID = p.m_product_id "+
@@ -126,7 +128,7 @@ public class ModWindsorValidSalesReq implements ModelValidator
 						if(qtyAvai == null)
 							qtyAvai = Env.ZERO;
 						BigDecimal aux = DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
-								//" qtyavailableofb(mp.M_Product_ID,1000010) FROM M_Product mp WHERE mp.M_Product_ID = "+oLine.getM_Product_ID());
+								" qtyavailableopenvianum(mp.M_Product_ID) FROM M_Product mp WHERE mp.M_Product_ID = "+rLine.getM_Product_ID());
 								" COALESCE ( "+
 							      "         (SELECT SUM (s.qtyonhand) "+
 							       "           FROM rv_storage s "+
@@ -207,7 +209,7 @@ public class ModWindsorValidSalesReq implements ModelValidator
 								          "             INNER JOIN C_Order o2  "+
 								           "               ON (ol2.C_ORDER_ID = o2.c_order_ID)  "+
 								            "     WHERE     ol2.M_Product_ID = p.m_product_id "+
-								             "          AND o2.m_warehouse_id = 10000240 "+
+								             "          AND o2.m_warehouse_id = 1000024 "+
 								              "         AND o2.saldada <> 'Y' "+
 								               "        AND o2.docstatus IN ('IP', 'CO') "+
 								                "       AND o2.issotrx = 'Y' "+
@@ -226,7 +228,7 @@ public class ModWindsorValidSalesReq implements ModelValidator
 							if(aux2 == null)
 								aux2 = Env.ZERO;
 							qtyAvai = qtyAvai.add(aux2);
-						}
+						}*/
 					}
 					else
 					{
@@ -275,8 +277,11 @@ public class ModWindsorValidSalesReq implements ModelValidator
 					{
 						if(qtyAvai == null)
 							qtyAvai = Env.ZERO;
-						if(rLine.getQty().compareTo(qtyAvai) > 0)
-							return "ERROR: Stock Insuficiente. Stock Disponible:"+qtyAvai.intValue();
+						if(rLine.getQty().compareTo(qtyAvai) > 0){
+							
+							MProduct prod = new MProduct (Env.getCtx(),rLine.getM_Product_ID(), null );
+							return "ERROR: Stock Insuficiente. Stock Disponible:"+qtyAvai.intValue() + " Codigo: " +prod.getValue();
+						}
 					}
 				}
 			}

@@ -20,17 +20,12 @@ package org.cwindsor.callout;
 
 import java.math.BigDecimal;
 import java.util.Properties;
-
-
-
-
-
 import org.compiere.model.CalloutEngine;
 import org.compiere.model.GridField;
 import org.compiere.model.GridTab;
-import org.compiere.model.MBPartner;
-import org.windsor.model.X_T_CuadroShopiFlow;
-import org.compiere.util.Env;
+//import org.compiere.model.MBPartner;
+//import org.windsor.model.X_T_CuadroShopiFlow;
+//import org.compiere.util.Env;
 
 //import org.compiere.util.Env;
 
@@ -42,7 +37,7 @@ import org.compiere.util.Env;
  */
 public class CalloutCuadroShopifyFlow extends CalloutEngine
 {
-	private Properties 		m_ctx;	
+	//private Properties 		m_ctx;	
 	/**
 	 *	Table: C_OrderLine
 	 * Desarrollo de callout que permiten varias cosas en la linea de orden de venta
@@ -57,7 +52,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifAmtFabShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
@@ -91,7 +86,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifQtyFabShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
@@ -127,7 +122,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifAmtMasShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
@@ -138,7 +133,8 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 			BigDecimal FL= (BigDecimal)mTab.getValue("MASHINIFLOWNETO");
 			BigDecimal SH= (BigDecimal)mTab.getValue("MASHINISHOPNETO");
 			BigDecimal VP= (BigDecimal)mTab.getValue("MASHINIVPNETO");
-			int dif = SH.intValue() - FL.intValue() - MP.intValue() - VP.intValue();
+			BigDecimal MC= (BigDecimal)mTab.getValue("MASHINIMACHNETO");
+			int dif = SH.intValue() - FL.intValue() - MP.intValue() - VP.intValue() - MC.intValue();
 		//	Rescato cliente para consultar stock
 			
 			mTab.setValue("MASHINIDIFNETO", new BigDecimal (dif) );
@@ -160,7 +156,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifQtyMasShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
@@ -171,7 +167,8 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 			BigDecimal FL= (BigDecimal)mTab.getValue("MASHINIFLOWQTY");
 			BigDecimal SH= (BigDecimal)mTab.getValue("MASHINISHOPQTY");
 			BigDecimal VP= (BigDecimal)mTab.getValue("MASHINIVPQTY");
-			int dif = SH.intValue() - FL.intValue() - MP.intValue() - VP.intValue();
+			BigDecimal MC= (BigDecimal)mTab.getValue("MASHINIMACHQTY");
+			int dif = SH.intValue() - FL.intValue() - MP.intValue() - VP.intValue() - MC.intValue();
 		//	Rescato cliente para consultar stock
 			
 			mTab.setValue("MASHINIDIFQTY", new BigDecimal (dif) );
@@ -193,7 +190,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifAmtWinShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
@@ -226,7 +223,7 @@ public class CalloutCuadroShopifyFlow extends CalloutEngine
 	public String setDifQtyWinShopy (Properties ctx, int WindowNo, GridTab mTab, GridField mField, Object value)
 	{
 		
-		m_ctx = Env.getCtx();
+		//m_ctx = Env.getCtx();
 		BigDecimal valor= (BigDecimal)				value;		//	Si es que marco pasar a OV la linea
 	//	String mensaje="Se Activa. PasarOv="+pasarov;
 		if (valor == null )
