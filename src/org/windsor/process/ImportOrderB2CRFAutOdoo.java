@@ -1093,9 +1093,27 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 
 					BigDecimal priceEntered = new BigDecimal((String) fila.get("priceentered"));
 					BigDecimal qtyEntered = new BigDecimal((String) fila.get("qtyentered"));
-					BigDecimal lineNetAmt = priceEntered.multiply(qtyEntered).setScale(0, RoundingMode.HALF_UP);
 					String reqLineIdStr = (String) fila.get("M_RequisitionLine_ID");
 					BigDecimal reqLineIdBD = (reqLineIdStr != null) ? new BigDecimal(reqLineIdStr) : null;
+
+					// FIX 2026-06-09 (FG): pre-check disponible real con FOR UPDATE lock
+					// evita inflación y race con otros batches. Si reserva saturada,
+					// degradar línea a Qty=0 + NotPrint='Y' para no romper la orden.
+					if (reqLineIdBD != null) {
+						BigDecimal dispReal = getDisponibleRealConLock(reqLineIdBD.intValue());
+						if (dispReal.compareTo(qtyEntered) < 0) {
+							log.warning("B2C OrderLine producto=" + fila.get("M_Product_ID")
+								+ " ReqLine=" + reqLineIdBD + " qtySolicitada=" + qtyEntered
+								+ " dispReal=" + dispReal + " AJUSTANDO a dispReal");
+							if (dispReal.compareTo(BigDecimal.ZERO) > 0) {
+								qtyEntered = dispReal;
+							} else {
+								qtyEntered = BigDecimal.ZERO;
+								reqLineIdBD = null;
+							}
+						}
+					}
+					BigDecimal lineNetAmt = priceEntered.multiply(qtyEntered).setScale(0, RoundingMode.HALF_UP);
 
 					String insertOrderLine = "INSERT INTO C_OrderLine "
 						+ "(C_OrderLine_ID,C_Order_ID,AD_Client_ID,AD_Org_ID,CreatedBy,UpdatedBy,"
@@ -1146,10 +1164,13 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 				listaOrder.add(order);
 			}
 
-			// Batch update QtyUsed en M_RequisitionLine (1 MERGE en vez de N updates)
-			if (!reqLineIdsToUpdate.isEmpty()) {
-				batchUpdateRequisitionLineQtyUsed(reqLineIdsToUpdate);
-			}
+			// FIX 2026-06-09 (FG): batchUpdateRequisitionLineQtyUsed DESACTIVADO.
+			// Fórmula basada en SUM(QtyEntered) divergía del ModelValidator
+			// ModWindsorUpdateReserved que usa SUM(QtyDelivered) post-fix.
+			// El validator AFTER_COMPLETE de la OV es la unica fuente de verdad.
+			// if (!reqLineIdsToUpdate.isEmpty()) {
+			//	batchUpdateRequisitionLineQtyUsed(reqLineIdsToUpdate);
+			// }
 
 			// Marcar cabecera B2C como procesada
 			String update = "UPDATE C_ORDERB2CAUT_Odoo SET Processed = 'Y' WHERE C_ORDERB2CAUT_Odoo_ID = " + b2c_id;
@@ -1202,20 +1223,25 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 			}
 		}
 
+		// FIX 2026-06: actualizar TAMBIEN QtyReserved = MAX(0, Qty - newQtyUsed)
+		// DocStatus: solo CO/IP/CL — DR e IN no cuentan como consumo confirmado
 		String sql = "MERGE INTO M_RequisitionLine rl"
 			+ " USING ("
 			+ "   SELECT col.M_RequisitionLine_ID,"
-			+ "          SUM(col.QTYENTERED) AS new_qtyused"
+			+ "          SUM(col.QTYENTERED) AS new_qtyused,"
+			+ "          GREATEST(0, rl2.Qty - SUM(col.QTYENTERED)) AS new_qtyreserved"
 			+ "   FROM C_OrderLine col"
 			+ "   INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
+			+ "   INNER JOIN M_RequisitionLine rl2 ON (rl2.M_RequisitionLine_ID = col.M_RequisitionLine_ID)"
 			+ "   WHERE col.M_RequisitionLine_ID IN (" + idList.toString() + ")"
-			+ "   AND co.DocStatus IN ('DR','IP','CO','CL','IN')"
-			+ "   GROUP BY col.M_RequisitionLine_ID"
+			+ "   AND co.DocStatus IN ('IP','CO','CL')"
+			+ "   GROUP BY col.M_RequisitionLine_ID, rl2.Qty"
 			+ " ) data"
 			+ " ON (rl.M_RequisitionLine_ID = data.M_RequisitionLine_ID)"
 			+ " WHEN MATCHED THEN UPDATE"
-			+ "   SET rl.QtyUsed = data.new_qtyused"
-			+ "   WHERE rl.QtyUsed <> data.new_qtyused";
+			+ "   SET rl.QtyUsed = data.new_qtyused,"
+			+ "       rl.QtyReserved = data.new_qtyreserved"
+			+ "   WHERE rl.QtyUsed <> data.new_qtyused OR rl.QtyReserved <> data.new_qtyreserved";
 		DB.executeUpdate(sql, get_TrxName());
 		log.info("Batch update QtyUsed: " + seen.size() + " M_RequisitionLine actualizadas.");
 	}
@@ -1296,6 +1322,38 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 	private void closeQuietly(PreparedStatement ps) {
 		if (ps != null) {
 			try { ps.close(); } catch (Exception e) { /* ignorar */ }
+		}
+	}
+
+	// FIX 2026-06-09 (FG): obtiene espacio real sin comprometer en ReqLine
+	// con FOR UPDATE lock. Devuelve Qty - SUM(QtyOrdered de OVs CO/IP/DR).
+	// Mantiene lock hasta commit/rollback de la trx actual.
+	private BigDecimal getDisponibleRealConLock(int reqLineId) {
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		try {
+			String sql = "SELECT rl.Qty - NVL((" +
+				" SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
+				" JOIN C_Order o ON o.C_Order_ID = co.C_Order_ID" +
+				" WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
+				"   AND o.DocStatus IN ('CO','IP','DR')),0) AS disponible" +
+				" FROM M_RequisitionLine rl" +
+				" WHERE rl.M_RequisitionLine_ID = ? FOR UPDATE";
+			ps = DB.prepareStatement(sql, get_TrxName());
+			ps.setInt(1, reqLineId);
+			rs = ps.executeQuery();
+			if (rs.next()) {
+				BigDecimal d = rs.getBigDecimal("disponible");
+				return d == null ? BigDecimal.ZERO : d;
+			}
+			return BigDecimal.ZERO;
+		} catch (Exception e) {
+			log.log(Level.SEVERE, "getDisponibleRealConLock ReqLine=" + reqLineId
+				+ " err=" + e.getMessage(), e);
+			return BigDecimal.ZERO;
+		} finally {
+			closeQuietly(rs);
+			closeQuietly(ps);
 		}
 	}
 

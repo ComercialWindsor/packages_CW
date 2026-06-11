@@ -348,6 +348,76 @@ public class MSequence extends X_AD_Sequence
 		return retValue;
 	} // nextID
 
+	/**
+	 * Get Document No from native Oracle sequence (CW optimization).
+	 * Attempts to use native Oracle sequences for better performance.
+	 * Nomenclature: SEQ_DTD_{TableName} or SEQ_DTD_{TableName}_{DocTypeKey}
+	 * Falls back to null if sequence doesn't exist.
+	 * @param TableName table name (e.g., M_InOut)
+	 * @param trxName transaction name
+	 * @param po persistent object for context
+	 * @return document number string or null if native sequence not found
+	 */
+	private static String getNativeSequenceDocumentNo(String TableName, String trxName, PO po)
+	{
+		if (TableName == null || !TableName.equals("M_InOut"))
+			return null;
+
+		Connection conn = null;
+		String sql = null;
+		try
+		{
+			Trx trx = trxName == null ? null : Trx.get(trxName, true);
+			if (trx != null)
+				conn = trx.getConnection();
+			else
+				conn = DB.getConnectionID();
+
+			if (conn == null)
+				return null;
+
+			// Try table-level sequence first
+			sql = "SELECT SEQ_DTD_M_InOut.NEXTVAL FROM DUAL";
+			try
+			{
+				PreparedStatement pstmt = conn.prepareStatement(sql);
+				ResultSet rs = pstmt.executeQuery();
+				if (rs.next())
+				{
+					int nextVal = rs.getInt(1);
+					rs.close();
+					pstmt.close();
+					s_log.finer("Native M_InOut sequence: " + nextVal + " [" + trxName + "]");
+					return String.valueOf(nextVal);
+				}
+				rs.close();
+				pstmt.close();
+			}
+			catch (SQLException e)
+			{
+				// Sequence doesn't exist, fall back to AD_Sequence
+				s_log.finer("Native sequence SEQ_DTD_M_InOut not found, using AD_Sequence");
+				return null;
+			}
+		}
+		catch (Exception e)
+		{
+			s_log.log(Level.WARNING, "Error accessing native sequence: " + sql, e);
+			return null;
+		}
+		finally
+		{
+			try
+			{
+				if (conn != null && trxName == null)
+					conn.close();
+			}
+			catch (Exception e) {}
+		}
+
+		return null;
+	}
+
 	/**************************************************************************
 	 * 	Get Document No from table
 	 *	@param AD_Client_ID client
@@ -372,6 +442,14 @@ public class MSequence extends X_AD_Sequence
 	{
 		if (TableName == null || TableName.length() == 0)
 			throw new IllegalArgumentException("TableName missing");
+
+		//	Try native Oracle sequence first (CW optimization)
+		if (DB.isOracle())
+		{
+			String nativeDocNo = getNativeSequenceDocumentNo(TableName, trxName, po);
+			if (nativeDocNo != null)
+				return nativeDocNo;
+		}
 
 		//	Check AdempiereSys
 		boolean adempiereSys = Ini.isPropertyBool(Ini.P_ADEMPIERESYS);

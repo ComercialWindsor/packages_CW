@@ -1,0 +1,42 @@
+-- =============================================================================
+-- Script: Preparar y calcular valor inicial para SEQ_DTD_M_InOut
+-- Package: packages_CW
+-- Propósito: Obtener máximo DocumentNo actual y calcular START WITH seguro
+-- =============================================================================
+
+-- PASO 1: Ver documentos M_InOut actuales
+SELECT COUNT(*) as total_m_inout FROM M_InOut;
+
+-- PASO 2: Ver máximo DocumentNo (puede tener prefijos/sufijos)
+SELECT MAX(DocumentNo) as max_documentno FROM M_InOut;
+
+-- PASO 3: Extraer número máximo (si es solo números)
+SELECT MAX(CAST(REGEXP_SUBSTR(DocumentNo, '[0-9]+') AS NUMBER)) as max_numeric_docno
+FROM M_InOut
+WHERE REGEXP_SUBSTR(DocumentNo, '[0-9]+') IS NOT NULL;
+
+-- PASO 4: Ejemplos de DocumentNo para analizar estructura
+SELECT DISTINCT DocumentNo FROM M_InOut
+ORDER BY DocumentNo DESC
+LIMIT 20;
+
+-- PASO 5: Calcular valor seguro para secuencias
+-- Si max DocumentNo es 50000, usar 1000000 (como está en script actual)
+-- Si max DocumentNo es > 1000000, usar MAX + 1000
+SELECT
+  MAX(CAST(REGEXP_SUBSTR(DocumentNo, '[0-9]+') AS NUMBER)) as current_max,
+  CASE
+    WHEN MAX(CAST(REGEXP_SUBSTR(DocumentNo, '[0-9]+') AS NUMBER)) IS NULL THEN 1000000
+    WHEN MAX(CAST(REGEXP_SUBSTR(DocumentNo, '[0-9]+') AS NUMBER)) < 1000000 THEN 1000000
+    ELSE MAX(CAST(REGEXP_SUBSTR(DocumentNo, '[0-9]+') AS NUMBER)) + 1000
+  END as recommended_start_with
+FROM M_InOut
+WHERE REGEXP_SUBSTR(DocumentNo, '[0-9]+') IS NOT NULL;
+
+-- =============================================================================
+-- INSTRUCCIONES:
+-- 1. Ejecutar este script
+-- 2. Verificar "recommended_start_with"
+-- 3. Actualizar 01_CREATE_SEQ_DTD_M_InOut.sql con ese valor
+-- 4. Ejecutar 01_CREATE_SEQ_DTD_M_InOut.sql
+-- =============================================================================

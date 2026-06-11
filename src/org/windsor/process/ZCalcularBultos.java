@@ -5,9 +5,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Properties;
 
 import org.compiere.model.MOrder;
 import org.compiere.process.ProcessInfoParameter;
@@ -19,13 +18,7 @@ import org.windsor.model.MZBultoParam;
 
 /**
  * ZCalcularBultos — Calcula y genera los bultos para una Nota de Venta.
- *
- * Algoritmo:
- *  - Por cada línea de la orden, detecta si el producto viene en cajas cerradas (UnitsPerPack > 0).
- *  - Divide la cantidad en unidades mínimas: caja completa o unidad individual.
- *  - Acumula unidades en el bulto actual hasta alcanzar el PesoMaxKg de la zona del cliente.
- *  - Al superar el límite, abre un nuevo bulto.
- *  - Al finalizar, numera los bultos (1/N, 2/N, ..., N/N) y persiste en C_Bulto + C_BultoLine.
+ * Expone proponer() y persistir() estaticos para reuso desde formularios.
  */
 public class ZCalcularBultos extends SvrProcess
 {
@@ -48,36 +41,62 @@ public class ZCalcularBultos extends SvrProcess
 		if (p_C_Order_ID <= 0)
 			throw new Exception("Se requiere una Nota de Venta");
 
+		List bultos = proponer(getCtx(), p_C_Order_ID, get_TrxName());
+		int  total  = persistir(getCtx(), p_C_Order_ID, bultos, get_TrxName());
+
 		MOrder order = new MOrder(getCtx(), p_C_Order_ID, get_TrxName());
+		return "OK: " + total + " bulto(s) generados para la orden " + order.getDocumentNo();
+	}
+
+	// =========================================================================
+	// API PUBLICA: PROPONER (sin tocar BD)
+	// =========================================================================
+	public static List proponer(Properties ctx, int orderId, String trxName)
+		throws Exception
+	{
+		MOrder order = new MOrder(ctx, orderId, trxName);
 		if (order.get_ID() == 0)
-			throw new Exception("Nota de Venta no encontrada: " + p_C_Order_ID);
+			throw new Exception("Nota de Venta no encontrada: " + orderId);
 
-		// --- 1. Datos del cliente y zona ---
-		String zona    = getClienteZona(order.getC_BPartner_Location_ID());
-		String address = getAddress(order.getC_BPartner_Location_ID());
-		String city    = getCity(order.getC_BPartner_Location_ID());
-
-		// --- 2. Líneas de la orden con datos de producto ---
-		List lineas = getOrderLineasConProducto(p_C_Order_ID);
+		String zona   = getClienteZona(order.getC_BPartner_Location_ID(), trxName);
+		List   lineas = getOrderLineasConProducto(orderId, trxName);
 		if (lineas.isEmpty())
-			throw new Exception("La nota de venta no tiene líneas de producto activas");
+			throw new Exception("La nota de venta no tiene lineas de producto activas");
 
-		// --- 3. Distribuir en bultos ---
-		List bultos = distribuirEnBultos(lineas, zona);
+		return distribuirEnBultos(ctx, lineas, zona, trxName);
+	}
 
-		// --- 4. Borrar bultos anteriores de esta orden ---
-		deleteBultosExistentes(p_C_Order_ID);
+	// =========================================================================
+	// API PUBLICA: PERSISTIR la propuesta (acepta lista editada por el form)
+	// =========================================================================
+	public static int persistir(Properties ctx, int orderId, List bultos, String trxName)
+		throws Exception
+	{
+		MOrder order   = new MOrder(ctx, orderId, trxName);
+		String address = getAddress(order.getC_BPartner_Location_ID(), trxName);
+		String city    = getCity   (order.getC_BPartner_Location_ID(), trxName);
 
-		// --- 5. Persistir nuevos bultos ---
-		int totalBultos = bultos.size();
-		int bultoNo     = 1;
-
-		for (int b = 0; b < bultos.size(); b++)
+		// Filtrar bultos vacios
+		List validos = new ArrayList();
+		for (int i = 0; i < bultos.size(); i++)
 		{
-			BultoTemp bt = (BultoTemp) bultos.get(b);
+			BultoPropuesta bp = (BultoPropuesta) bultos.get(i);
+			if (bp.lineas != null && !bp.lineas.isEmpty())
+				validos.add(bp);
+		}
+		int totalBultos = validos.size();
+		if (totalBultos == 0)
+			throw new Exception("No hay bultos a generar");
 
-			MCBulto bulto = new MCBulto(getCtx(), 0, get_TrxName());
-			bulto.setC_Order_ID(p_C_Order_ID);
+		deleteBultosExistentes(orderId, trxName);
+
+		int bultoNo = 1;
+		for (int b = 0; b < validos.size(); b++)
+		{
+			BultoPropuesta bp = (BultoPropuesta) validos.get(b);
+
+			MCBulto bulto = new MCBulto(ctx, 0, trxName);
+			bulto.setC_Order_ID(orderId);
 			bulto.setC_BPartner_ID(order.getC_BPartner_ID());
 			bulto.setC_BPartner_Location_ID(order.getC_BPartner_Location_ID());
 			bulto.setAddress1(address);
@@ -85,79 +104,73 @@ public class ZCalcularBultos extends SvrProcess
 			bulto.setDateAcct(new Timestamp(System.currentTimeMillis()));
 			bulto.setBultoNo(String.valueOf(bultoNo));
 			bulto.setTotalBulto(totalBultos);
-			bulto.setDocumentNo(generarDocumentNo(p_C_Order_ID, bultoNo));
+			bulto.setDocumentNo(orderId + "-" + bultoNo);
 			bulto.setIsActive(true);
-
 			if (!bulto.save())
 				throw new Exception("Error al guardar C_Bulto " + bultoNo);
 
 			int lineNo = 10;
-			for (int i = 0; i < bt.productos.size(); i++)
+			for (int i = 0; i < bp.lineas.size(); i++)
 			{
-				ProductoEnBulto pb = (ProductoEnBulto) bt.productos.get(i);
-
-				MCBultoLine linea = new MCBultoLine(getCtx(), bulto.getC_Bulto_ID(), p_C_Order_ID, get_TrxName());
+				LineaPropuesta lp = (LineaPropuesta) bp.lineas.get(i);
+				MCBultoLine linea = new MCBultoLine(ctx, bulto.getC_Bulto_ID(), orderId, trxName);
 				linea.setLine(lineNo);
-				linea.setM_Product_ID(pb.productId);
-				linea.setValue(pb.productValue);
-				linea.setDescription(pb.productName);
-				linea.setQtyEntered(pb.qty);
+				linea.setM_Product_ID(lp.productId);
+				linea.setValue(lp.productValue);
+				linea.setDescription(lp.productName);
+				linea.setQtyEntered(lp.qty);
 				linea.setIsActive(true);
-
 				if (!linea.save())
-					throw new Exception("Error al guardar C_BultoLine para producto " + pb.productValue);
-
+					throw new Exception("Error al guardar C_BultoLine " + lp.productValue);
 				lineNo += 10;
 			}
 			bultoNo++;
 		}
 
-		return "OK: " + totalBultos + " bulto(s) generados para la orden " + order.getDocumentNo()
-			+ " | Zona: " + (zona != null ? zona : "Santiago");
+		// Actualizar cantidad de bultos en la nota de venta
+		order.set_ValueOfColumn("Bultos", new Integer(totalBultos));
+		if (!order.save(trxName))
+			throw new Exception("No se pudo actualizar Bultos en la Nota de Venta");
+
+		return totalBultos;
 	}
 
-	// -------------------------------------------------------------------------
-	// Obtener la zona del cliente desde C_BPartner_Location → C_Location → C_City
-	// -------------------------------------------------------------------------
-	private String getClienteZona(int bPartnerLocationId)
+	// =========================================================================
+	// LOOKUPS (estaticos)
+	// =========================================================================
+	private static String getClienteZona(int bplId, String trxName)
 	{
-		if (bPartnerLocationId <= 0) return null;
+		if (bplId <= 0) return null;
 		String sql =
-			"SELECT ci.Zona " +
-			"FROM C_BPartner_Location bpl " +
+			"SELECT ci.Zona FROM C_BPartner_Location bpl " +
 			"JOIN C_Location l ON bpl.C_Location_ID = l.C_Location_ID " +
 			"LEFT JOIN C_City ci ON l.C_City_ID = ci.C_City_ID " +
 			"WHERE bpl.C_BPartner_Location_ID = ?";
-		return DB.getSQLValueString(get_TrxName(), sql, bPartnerLocationId);
+		return DB.getSQLValueString(trxName, sql, bplId);
 	}
 
-	private String getAddress(int bPartnerLocationId)
+	private static String getAddress(int bplId, String trxName)
 	{
-		if (bPartnerLocationId <= 0) return null;
+		if (bplId <= 0) return null;
 		String sql =
-			"SELECT l.Address1 " +
-			"FROM C_BPartner_Location bpl " +
+			"SELECT l.Address1 FROM C_BPartner_Location bpl " +
 			"JOIN C_Location l ON bpl.C_Location_ID = l.C_Location_ID " +
 			"WHERE bpl.C_BPartner_Location_ID = ?";
-		return DB.getSQLValueString(get_TrxName(), sql, bPartnerLocationId);
+		return DB.getSQLValueString(trxName, sql, bplId);
 	}
 
-	private String getCity(int bPartnerLocationId)
+	private static String getCity(int bplId, String trxName)
 	{
-		if (bPartnerLocationId <= 0) return null;
+		if (bplId <= 0) return null;
 		String sql =
-			"SELECT NVL(ci.Name, l.City) " +
-			"FROM C_BPartner_Location bpl " +
+			"SELECT NVL(ci.Name, l.City) FROM C_BPartner_Location bpl " +
 			"JOIN C_Location l ON bpl.C_Location_ID = l.C_Location_ID " +
 			"LEFT JOIN C_City ci ON l.C_City_ID = ci.C_City_ID " +
 			"WHERE bpl.C_BPartner_Location_ID = ?";
-		return DB.getSQLValueString(get_TrxName(), sql, bPartnerLocationId);
+		return DB.getSQLValueString(trxName, sql, bplId);
 	}
 
-	// -------------------------------------------------------------------------
-	// Obtener líneas de la orden con datos de producto relevantes
-	// -------------------------------------------------------------------------
-	private List getOrderLineasConProducto(int orderId)
+	private static List getOrderLineasConProducto(int orderId, String trxName)
 	{
 		List result = new ArrayList();
 		String sql =
@@ -170,35 +183,33 @@ public class ZCalcularBultos extends SvrProcess
 			"FROM C_OrderLine ol " +
 			"JOIN M_Product p ON ol.M_Product_ID = p.M_Product_ID " +
 			"WHERE ol.C_Order_ID = ? " +
-			"  AND ol.IsActive = 'Y' " +
-			"  AND p.ProductType = 'I' " +
-			"  AND ol.QtyOrdered > 0 " +
+			"  AND ol.IsActive = 'Y' AND p.ProductType = 'I' AND ol.QtyOrdered > 0 " +
 			"ORDER BY ol.Line";
 
 		PreparedStatement pstmt = null;
 		ResultSet rs = null;
 		try
 		{
-			pstmt = DB.prepareStatement(sql, get_TrxName());
+			pstmt = DB.prepareStatement(sql, trxName);
 			pstmt.setInt(1, orderId);
 			rs = pstmt.executeQuery();
 			while (rs.next())
 			{
-				LineaProducto lp = new LineaProducto();
-				lp.productId     = rs.getInt("M_Product_ID");
-				lp.productValue  = rs.getString("Value");
-				lp.productName   = rs.getString("Name");
-				lp.qty           = rs.getBigDecimal("QtyOrdered");
-				lp.pesoUnitario  = rs.getBigDecimal("PESO");
-				lp.pesoBox       = rs.getBigDecimal("PesoBox");
-				lp.unitsPerPack  = rs.getInt("UnitsPerPack");
-				lp.categoryId    = rs.getInt("M_Product_Category_ID");
+				LineaProductoOrden lp = new LineaProductoOrden();
+				lp.productId    = rs.getInt("M_Product_ID");
+				lp.productValue = rs.getString("Value");
+				lp.productName  = rs.getString("Name");
+				lp.qty          = rs.getBigDecimal("QtyOrdered");
+				lp.pesoUnitario = rs.getBigDecimal("PESO");
+				lp.pesoBox      = rs.getBigDecimal("PesoBox");
+				lp.unitsPerPack = rs.getInt("UnitsPerPack");
+				lp.categoryId   = rs.getInt("M_Product_Category_ID");
 				result.add(lp);
 			}
 		}
 		catch (Exception e)
 		{
-			throw new RuntimeException("Error leyendo líneas de orden: " + e.getMessage(), e);
+			throw new RuntimeException("Error leyendo lineas de orden: " + e.getMessage(), e);
 		}
 		finally
 		{
@@ -207,129 +218,69 @@ public class ZCalcularBultos extends SvrProcess
 		return result;
 	}
 
-	// -------------------------------------------------------------------------
-	// Algoritmo de distribución en bultos
-	// -------------------------------------------------------------------------
-	private List distribuirEnBultos(List lineas, String zona)
+	private static List distribuirEnBultos(Properties ctx, List lineas, String zona, String trxName)
 	{
-		List bultos  = new ArrayList();
-		BultoTemp bt = new BultoTemp();
+		List bultos = new ArrayList();
+		BultoPropuesta bt = new BultoPropuesta();
 		bultos.add(bt);
 
 		for (int i = 0; i < lineas.size(); i++)
 		{
-			LineaProducto lp = (LineaProducto) lineas.get(i);
-
-			BigDecimal pesoLimit = MZBultoParam.getPesoMax(getCtx(), lp.categoryId, zona, get_TrxName());
+			LineaProductoOrden lp = (LineaProductoOrden) lineas.get(i);
+			BigDecimal pesoLimit  = MZBultoParam.getPesoMax(ctx, lp.categoryId, zona, trxName);
+			bt.pesoLimit          = pesoLimit;
 
 			if (lp.unitsPerPack > 0 && lp.qty.compareTo(BigDecimal.ZERO) > 0)
 			{
-				// Producto en cajas cerradas
-				int numCajas    = lp.qty.divide(new BigDecimal(lp.unitsPerPack), 0, BigDecimal.ROUND_DOWN).intValue();
-				int resto       = lp.qty.intValue() % lp.unitsPerPack;
-				BigDecimal pesoporCaja = lp.pesoBox.compareTo(BigDecimal.ZERO) > 0
+				int numCajas = lp.qty.divide(new BigDecimal(lp.unitsPerPack), 0, BigDecimal.ROUND_DOWN).intValue();
+				int resto    = lp.qty.intValue() % lp.unitsPerPack;
+				BigDecimal pesoCaja = lp.pesoBox.compareTo(BigDecimal.ZERO) > 0
 					? lp.pesoBox
 					: lp.pesoUnitario.multiply(new BigDecimal(lp.unitsPerPack));
-
 				for (int c = 0; c < numCajas; c++)
-				{
-					bt = agregarUnidad(bultos, bt, lp, new BigDecimal(lp.unitsPerPack), pesoporCaja, pesoLimit);
-				}
-				// Resto de unidades sueltas (cantidad no completa de caja)
+					bt = agregarUnidad(bultos, bt, lp, new BigDecimal(lp.unitsPerPack), pesoCaja, pesoLimit);
 				if (resto > 0)
-				{
-					BigDecimal pesoResto = lp.pesoUnitario.multiply(new BigDecimal(resto));
-					bt = agregarUnidad(bultos, bt, lp, new BigDecimal(resto), pesoResto, pesoLimit);
-				}
+					bt = agregarUnidad(bultos, bt, lp, new BigDecimal(resto),
+						lp.pesoUnitario.multiply(new BigDecimal(resto)), pesoLimit);
 			}
 			else
 			{
-				// Sin cajas: agregar unidad por unidad
-				int totalUnidades = lp.qty.intValue();
-				for (int u = 0; u < totalUnidades; u++)
-				{
+				int total = lp.qty.intValue();
+				for (int u = 0; u < total; u++)
 					bt = agregarUnidad(bultos, bt, lp, BigDecimal.ONE, lp.pesoUnitario, pesoLimit);
-				}
 			}
 		}
 
-		// Consolidar líneas del mismo producto dentro de cada bulto
-		consolidarBultos(bultos);
+		for (int b = 0; b < bultos.size(); b++)
+			((BultoPropuesta) bultos.get(b)).consolidar();
 		return bultos;
 	}
 
-	/** Intenta agregar una unidad al bulto actual; si supera el límite, abre uno nuevo. */
-	private BultoTemp agregarUnidad(List bultos, BultoTemp bt, LineaProducto lp,
+	private static BultoPropuesta agregarUnidad(List bultos, BultoPropuesta bt, LineaProductoOrden lp,
 		BigDecimal qty, BigDecimal peso, BigDecimal pesoLimit)
 	{
-		// Si el bulto actual ya tiene algo y agregar esto supera el límite → nuevo bulto
-		if (bt.pesoTotal.compareTo(BigDecimal.ZERO) > 0
-			&& bt.pesoTotal.add(peso).compareTo(pesoLimit) > 0)
+		BigDecimal pesoActual = bt.pesoTotal();
+		if (pesoActual.compareTo(BigDecimal.ZERO) > 0
+			&& pesoActual.add(peso).compareTo(pesoLimit) > 0)
 		{
-			bt = new BultoTemp();
+			bt = new BultoPropuesta();
+			bt.pesoLimit = pesoLimit;
 			bultos.add(bt);
 		}
-		bt.agregarProducto(lp.productId, lp.productValue, lp.productName, qty);
-		bt.pesoTotal = bt.pesoTotal.add(peso);
+		BigDecimal pesoUnit = qty.compareTo(BigDecimal.ZERO) > 0
+			? peso.divide(qty, 4, BigDecimal.ROUND_HALF_UP)
+			: BigDecimal.ZERO;
+		bt.lineas.add(new LineaPropuesta(lp.productId, lp.productValue, lp.productName, qty, pesoUnit));
 		return bt;
 	}
 
-	/** Fusiona entradas duplicadas del mismo producto dentro de cada bulto */
-	private void consolidarBultos(List bultos)
+	private static void deleteBultosExistentes(int orderId, String trxName)
 	{
-		for (int b = 0; b < bultos.size(); b++)
-		{
-			BultoTemp bt = (BultoTemp) bultos.get(b);
-			Map consolidado = new HashMap(); // productId → ProductoEnBulto
-			List orden      = new ArrayList();
-
-			for (int p = 0; p < bt.productos.size(); p++)
-			{
-				ProductoEnBulto pb = (ProductoEnBulto) bt.productos.get(p);
-				Integer key = new Integer(pb.productId);
-				if (consolidado.containsKey(key))
-				{
-					ProductoEnBulto existing = (ProductoEnBulto) consolidado.get(key);
-					existing.qty = existing.qty.add(pb.qty);
-				}
-				else
-				{
-					consolidado.put(key, pb);
-					orden.add(pb);
-				}
-			}
-			bt.productos = orden;
-		}
+		DB.executeUpdate("DELETE FROM C_BultoLine WHERE C_Order_ID = " + orderId, trxName);
+		DB.executeUpdate("DELETE FROM C_Bulto     WHERE C_Order_ID = " + orderId, trxName);
 	}
 
-	// -------------------------------------------------------------------------
-	// Borrar bultos anteriores de la orden
-	// -------------------------------------------------------------------------
-	private void deleteBultosExistentes(int orderId)
-	{
-		// Borrar líneas primero (FK)
-		DB.executeUpdate(
-			"DELETE FROM C_BultoLine WHERE C_Order_ID = " + orderId,
-			get_TrxName());
-		// Borrar bultos
-		DB.executeUpdate(
-			"DELETE FROM C_Bulto WHERE C_Order_ID = " + orderId,
-			get_TrxName());
-	}
-
-	// -------------------------------------------------------------------------
-	// Generar DocumentNo para el bulto: ORDER_ID + "-" + bultoNo
-	// -------------------------------------------------------------------------
-	private String generarDocumentNo(int orderId, int bultoNo)
-	{
-		return orderId + "-" + bultoNo;
-	}
-
-	// =========================================================================
-	// Clases internas de apoyo (Java 1.6: sin generics avanzados)
-	// =========================================================================
-
-	private static class LineaProducto
+	private static class LineaProductoOrden
 	{
 		int        productId;
 		String     productValue;
@@ -339,32 +290,5 @@ public class ZCalcularBultos extends SvrProcess
 		BigDecimal pesoBox;
 		int        unitsPerPack;
 		int        categoryId;
-	}
-
-	private static class ProductoEnBulto
-	{
-		int        productId;
-		String     productValue;
-		String     productName;
-		BigDecimal qty;
-
-		ProductoEnBulto(int id, String value, String name, BigDecimal q)
-		{
-			this.productId    = id;
-			this.productValue = value;
-			this.productName  = name;
-			this.qty          = q;
-		}
-	}
-
-	private static class BultoTemp
-	{
-		List       productos  = new ArrayList();
-		BigDecimal pesoTotal  = BigDecimal.ZERO;
-
-		void agregarProducto(int productId, String value, String name, BigDecimal qty)
-		{
-			productos.add(new ProductoEnBulto(productId, value, name, qty));
-		}
 	}
 }

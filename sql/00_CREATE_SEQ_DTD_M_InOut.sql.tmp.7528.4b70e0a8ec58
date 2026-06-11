@@ -1,0 +1,72 @@
+-- =============================================================================
+-- Script: Crear SEQ_DTD_M_InOut - Secuencias nativas Oracle para DocumentNo
+-- Package: packages_CW
+-- Propósito: Optimizar generación masiva de M_InOut usando secuencias nativas
+--
+-- ANALISIS DATOS PRODUCCION (windsorp, 2026-06-03):
+-- - M_InOut total: 713,777 registros
+-- - DocumentNo numericos puros: 690,876
+-- - DocumentNo con prefijo/sufijo: 22,901
+--
+-- MAPA DE COLISIONES (DocumentNo numericos existentes):
+-- - 1-7 digitos: hasta 3,157,534 (rango operacional bulk: 690k docs)
+-- - 8 digitos:   10000000-10000004, 10000511-10000514, 31568646
+-- - 9 digitos:   118925031-118925063 (block), 590039319
+-- - 13 digitos:  8 outliers (~1.19 billones / trillion)
+--
+-- ZONA LIMPIA ELEGIDA: START WITH 40,000,000
+-- - Por encima del max 8-digit existente (31,568,646)
+-- - Por debajo del block 9-digit (118,925,031)
+-- - Runway 40M -> 118.9M = ~79M documentos sin colision (decadas)
+-- - Formato 8-digit, consistente con docs 8-digit ya existentes
+-- =============================================================================
+
+-- Verificación pre-creación
+SELECT COUNT(*) as total_m_inout FROM M_InOut;
+
+-- =============================================================================
+-- CREAR SECUENCIAS
+-- =============================================================================
+
+CREATE SEQUENCE SEQ_DTD_M_InOut
+  START WITH 40000000
+  INCREMENT BY 1
+  MINVALUE 1
+  MAXVALUE 999999999
+  NOCYCLE
+  CACHE 20
+  ORDER;
+
+CREATE SEQUENCE SEQ_DTD_M_InOut_SO
+  START WITH 40000000
+  INCREMENT BY 1
+  MINVALUE 1
+  MAXVALUE 999999999
+  NOCYCLE
+  CACHE 20
+  ORDER;
+
+CREATE SEQUENCE SEQ_DTD_M_InOut_PO
+  START WITH 40000000
+  INCREMENT BY 1
+  MINVALUE 1
+  MAXVALUE 999999999
+  NOCYCLE
+  CACHE 20
+  ORDER;
+
+CREATE SEQUENCE SEQ_DTD_M_InOut_MM
+  START WITH 40000000
+  INCREMENT BY 1
+  MINVALUE 1
+  MAXVALUE 999999999
+  NOCYCLE
+  CACHE 20
+  ORDER;
+
+COMMIT;
+
+-- Verificación post-creación
+SELECT sequence_name, last_number FROM user_sequences
+WHERE sequence_name LIKE 'SEQ_DTD%'
+ORDER BY sequence_name;

@@ -32,7 +32,7 @@ import org.compiere.util.Env;
 /**
  *	Validator for company WINDSOR
  *
- *  @author Italo Niñoles
+ *  @author Italo Niï¿½oles
  */
 public class ModWindsorValidSalesReq implements ModelValidator
 {
@@ -76,15 +76,20 @@ public class ModWindsorValidSalesReq implements ModelValidator
 
     /**
      *	Model Change of a monitored Table.
-     *	OFB Consulting Ltda. By italo niñoles
+     *	OFB Consulting Ltda. By italo niï¿½oles
      */
 	public String modelChange (PO po, int type) throws Exception
 	{
 		log.info(po.get_TableName() + " Type: "+type);
 		
-		if((type == TYPE_BEFORE_NEW || type == TYPE_BEFORE_CHANGE)&& po.get_Table_ID()== MRequisitionLine.Table_ID)  
+		if((type == TYPE_BEFORE_NEW || type == TYPE_BEFORE_CHANGE)&& po.get_Table_ID()== MRequisitionLine.Table_ID)
 		{
 			MRequisitionLine rLine = (MRequisitionLine) po;
+
+			// Solo validar si la cantidad pedida cambio (evita bloquear updates internos de QtyReserved/QtyUsed)
+			if(type == TYPE_BEFORE_CHANGE && !rLine.is_ValueChanged("Qty"))
+				return null;
+
 			MRequisition req = rLine.getParent();
 			if(req.isSOTrx()) 
 			{
@@ -97,138 +102,7 @@ public class ModWindsorValidSalesReq implements ModelValidator
 					{
 						qtyAvai= DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
 								" qtyavailableopenvianum(mp.M_Product_ID) FROM M_Product mp WHERE mp.M_Product_ID = "+rLine.getM_Product_ID());
-						/*		" COALESCE ( "+
-							      "         (SELECT SUM (s.qtyonhand) "+
-							       "           FROM rv_storage s "+
-							        "         WHERE     s.M_Product_ID = p.m_product_id "+
-							         "              AND s.m_warehouse_id IN (1000001) "+
-							          "             AND s.isactive = 'Y'), "+
-							           "    0) "+
-							          " - (  (SELECT COALESCE (SUM (ol2.qtyreserved), 0)      "+
-							         "         FROM C_orderline ol2      "+
-							          "             INNER JOIN C_Order o2  "+
-							           "               ON (ol2.C_ORDER_ID = o2.c_order_ID)  "+
-							            "     WHERE     ol2.M_Product_ID = p.m_product_id "+
-							             "          AND o2.m_warehouse_id = 1000001 "+
-							              "         AND o2.saldada <> 'Y' "+
-							               "        AND o2.docstatus IN ('IP', 'CO') "+
-							                "       AND o2.issotrx = 'Y' "+
-							                 "      AND o2.c_doctypetarget_ID NOT IN "+
-							                  "            (1000110, 1000048, 1000568)) "+
-							            " + (SELECT COALESCE (SUM (rl.qtyreserved), 0)     "+
-							             "     FROM M_Requisitionline rl     "+
-							              "         INNER JOIN M_Requisition r  "+
-							               "           ON (rl.M_Requisition_ID = r.M_Requisition_ID)  "+
-							                " WHERE     rl.M_Product_ID = p.m_product_id  "+
-							                 "      AND r.m_warehouse_id = 1000001  "+
-							                  "     AND r.docstatus IN ('CO')  "+
-							                   "    AND r.issotrx = 'Y'))  "+
-								
-												" FROM M_Product p WHERE p.M_Product_ID = "+rLine.getM_Product_ID());
-						if(qtyAvai == null)
-							qtyAvai = Env.ZERO;
-						BigDecimal aux = DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
-								" qtyavailableopenvianum(mp.M_Product_ID) FROM M_Product mp WHERE mp.M_Product_ID = "+rLine.getM_Product_ID());
-								" COALESCE ( "+
-							      "         (SELECT SUM (s.qtyonhand) "+
-							       "           FROM rv_storage s "+
-							        "         WHERE     s.M_Product_ID = p.m_product_id "+
-							         "              AND s.m_warehouse_id IN (1000010) "+
-							          "             AND s.isactive = 'Y'), "+
-							           "    0) "+
-							          " - (  (SELECT COALESCE (SUM (ol2.qtyreserved), 0)      "+
-							         "         FROM C_orderline ol2      "+
-							          "             INNER JOIN C_Order o2  "+
-							           "               ON (ol2.C_ORDER_ID = o2.c_order_ID)  "+
-							            "     WHERE     ol2.M_Product_ID = p.m_product_id "+
-							             "          AND o2.m_warehouse_id = 1000010 "+
-							              "         AND o2.saldada <> 'Y' "+
-							               "        AND o2.docstatus IN ('IP', 'CO') "+
-							                "       AND o2.issotrx = 'Y' "+
-							                 "      AND o2.c_doctypetarget_ID NOT IN "+
-							                  "            (1000110, 1000048, 1000568)) "+
-							            " + (SELECT COALESCE (SUM (rl.qtyreserved), 0)     "+
-							             "     FROM M_Requisitionline rl     "+
-							              "         INNER JOIN M_Requisition r  "+
-							               "           ON (rl.M_Requisition_ID = r.M_Requisition_ID)  "+
-							                " WHERE     rl.M_Product_ID = p.m_product_id  "+
-							                 "      AND r.m_warehouse_id = 1000010  "+
-							                  "     AND r.docstatus IN ('CO')  "+
-							                   "    AND r.issotrx = 'Y'))  "+
-								
-												" FROM M_Product p WHERE p.M_Product_ID = "+rLine.getM_Product_ID());
-						if(aux == null)
-							aux = Env.ZERO;
-						qtyAvai = qtyAvai.add(aux);
-						aux = DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
-								//" qtyavailableofb(mp.M_Product_ID,1000010) FROM M_Product mp WHERE mp.M_Product_ID = "+oLine.getM_Product_ID());
-								" COALESCE ( "+
-							      "         (SELECT SUM (s.qtyonhand) "+
-							       "           FROM rv_storage s "+
-							        "         WHERE     s.M_Product_ID = p.m_product_id "+
-							         "              AND s.m_warehouse_id IN (1000033) "+
-							          "             AND s.isactive = 'Y'), "+
-							           "    0) "+
-							          " - (  (SELECT COALESCE (SUM (ol2.qtyreserved), 0)      "+
-							         "         FROM C_orderline ol2      "+
-							          "             INNER JOIN C_Order o2  "+
-							           "               ON (ol2.C_ORDER_ID = o2.c_order_ID)  "+
-							            "     WHERE     ol2.M_Product_ID = p.m_product_id "+
-							             "          AND o2.m_warehouse_id = 1000033 "+
-							              "         AND o2.saldada <> 'Y' "+
-							               "        AND o2.docstatus IN ('IP', 'CO') "+
-							                "       AND o2.issotrx = 'Y' "+
-							                 "      AND o2.c_doctypetarget_ID NOT IN "+
-							                  "            (1000110, 1000048, 1000568)) "+
-							            " + (SELECT COALESCE (SUM (rl.qtyreserved), 0)     "+
-							             "     FROM M_Requisitionline rl     "+
-							              "         INNER JOIN M_Requisition r  "+
-							               "           ON (rl.M_Requisition_ID = r.M_Requisition_ID)  "+
-							                " WHERE     rl.M_Product_ID = p.m_product_id  "+
-							                 "      AND r.m_warehouse_id = 1000033  "+
-							                  "     AND r.docstatus IN ('CO')  "+
-							                   "    AND r.issotrx = 'Y'))  "+
-								
-												" FROM M_Product p WHERE p.M_Product_ID = "+rLine.getM_Product_ID());
-						if(aux == null)
-							aux = Env.ZERO;
-						qtyAvai = qtyAvai.add(aux);
-						if(req.get_ValueAsInt("C_BPartner_Location_ID") == 1010879)
-						{
-							BigDecimal aux2 = DB.getSQLValueBD(po.get_TrxName(), "SELECT "+ 
-									//" qtyavailableofb(mp.M_Product_ID,1000024) FROM M_Product mp WHERE mp.M_Product_ID = "+oLine.getM_Product_ID());
-									" COALESCE ( "+
-								      "         (SELECT SUM (s.qtyonhand) "+
-								       "           FROM rv_storage s "+
-								        "         WHERE     s.M_Product_ID = p.m_product_id "+
-								         "              AND s.m_warehouse_id IN (1000024) "+
-								          "             AND s.isactive = 'Y'), "+
-								           "    0) "+
-								          " - (  (SELECT COALESCE (SUM (ol2.qtyreserved), 0)      "+
-								         "         FROM C_orderline ol2      "+
-								          "             INNER JOIN C_Order o2  "+
-								           "               ON (ol2.C_ORDER_ID = o2.c_order_ID)  "+
-								            "     WHERE     ol2.M_Product_ID = p.m_product_id "+
-								             "          AND o2.m_warehouse_id = 1000024 "+
-								              "         AND o2.saldada <> 'Y' "+
-								               "        AND o2.docstatus IN ('IP', 'CO') "+
-								                "       AND o2.issotrx = 'Y' "+
-								                 "      AND o2.c_doctypetarget_ID NOT IN "+
-								                  "            (1000110, 1000048, 1000568)) "+
-								            " + (SELECT COALESCE (SUM (rl.qtyreserved), 0)     "+
-								             "     FROM M_Requisitionline rl     "+
-								              "         INNER JOIN M_Requisition r  "+
-								               "           ON (rl.M_Requisition_ID = r.M_Requisition_ID)  "+
-								                " WHERE     rl.M_Product_ID = p.m_product_id  "+
-								                 "      AND r.m_warehouse_id = 1000024  "+
-								                  "     AND r.docstatus IN ('CO')  "+
-								                   "    AND r.issotrx = 'Y'))  "+
-									
- 												" FROM M_Product p WHERE p.M_Product_ID = "+rLine.getM_Product_ID());
-							if(aux2 == null)
-								aux2 = Env.ZERO;
-							qtyAvai = qtyAvai.add(aux2);
-						}*/
+						
 					}
 					else
 					{
@@ -270,9 +144,8 @@ public class ModWindsorValidSalesReq implements ModelValidator
 							qtyAvai = qtyAvai.add(aux2);
 						}
 					}
-					//validacion solo si es borrador ya que despues la linea se actualiza por la NV y manda error.
-					if(req.getDocStatus().compareTo("DR") == 0
-							|| req.getDocStatus().compareTo("IP") == 0)
+					//validacion solo si es borrador - IP excluido porque procesos internos (NV) actualizan QtyReserved/QtyUsed en ese estado
+					if(req.getDocStatus().compareTo("DR") == 0)
 						
 					{
 						if(qtyAvai == null)

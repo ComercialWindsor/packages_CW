@@ -119,7 +119,7 @@ public class ImportFileRFUpdate extends SvrProcess
 		    		int cantidad = Integer.parseInt(datosFStr[1].toString().trim().replace(".",""));
 		    		if(datosFStr[2] != null)
 		    		{
-		    			if(datosFStr[2].equals("S"))
+		    			if(datosFStr[2].toUpperCase().equals("S") || datosFStr[2].toUpperCase().equals("Y"))
 		    					bloquear="Y";
 		    			else
 		    				bloquear="N";
