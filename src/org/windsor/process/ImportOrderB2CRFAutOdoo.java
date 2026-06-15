@@ -64,7 +64,7 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 	/** Flag para detectar conexion perdida (SQLRecoverableException) y abortar */
 	private boolean m_connectionLost = false;
 
-	class ConexioDBMuro {
+	/*class ConexioDBMuro {
 		Connection conn;
 		public ConexioDBMuro() {
 			try {
@@ -78,7 +78,7 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 				log.log(Level.SEVERE, "Error al cargar Driver. " + e.toString(), e);
 			}
 		}
-	}
+	}*/
 
 	/**
 	 * Prepare - e.g., get Parameters.
@@ -1326,17 +1326,27 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 	}
 
 	// FIX 2026-06-09 (FG): obtiene espacio real sin comprometer en ReqLine
-	// con FOR UPDATE lock. Devuelve Qty - SUM(QtyOrdered de OVs CO/IP/DR).
-	// Mantiene lock hasta commit/rollback de la trx actual.
+	// con FOR UPDATE lock. Mantiene lock hasta commit/rollback de la trx actual.
+	//
+	// FIX 2026-06-11 (FG): LEAST de dos checks:
+	//   1) Qty - SUM(OVs CO/IP/DR): espacio no comprometido en la linea
+	//   2) GREATEST(0, qtyavailableopenvianum + QtyReserved): backing fisico real
+	//      (qtyavailableopenvianum ya descontó QtyReserved; sumarlo devuelve el
+	//       stock fisico que respalda ESTA reserva. Si es 0, la reserva esta obsoleta.)
+	// El LEAST previene consumir mas de lo que el stock fisico puede respaldar.
 	private BigDecimal getDisponibleRealConLock(int reqLineId) {
 		PreparedStatement ps = null;
 		ResultSet rs = null;
 		try {
-			String sql = "SELECT rl.Qty - NVL((" +
-				" SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
-				" JOIN C_Order o ON o.C_Order_ID = co.C_Order_ID" +
-				" WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
-				"   AND o.DocStatus IN ('CO','IP','DR')),0) AS disponible" +
+			String sql = "SELECT LEAST(" +
+				" rl.Qty - NVL((" +
+				"   SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
+				"   JOIN C_Order o ON o.C_Order_ID = co.C_Order_ID" +
+				"   WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
+				"     AND o.DocStatus IN ('CO','IP','DR')" +
+				" ), 0)," +
+				" GREATEST(0, NVL(qtyavailableopenvianum(rl.M_Product_ID), 0) + rl.QtyReserved)" +
+				") AS disponible" +
 				" FROM M_RequisitionLine rl" +
 				" WHERE rl.M_RequisitionLine_ID = ? FOR UPDATE";
 			ps = DB.prepareStatement(sql, get_TrxName());
@@ -1362,9 +1372,9 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 	// =========================================================================
 
 	private void prepararIOrderB2CAut() {
-		ConexioDBMuro conexion = new ConexioDBMuro();
+		//ConexioDBMuro conexion = new ConexioDBMuro();
 		ejecutarSQL("DELETE FROM I_OrderB2CAut_Odoo");
-		try {
+		/*try {
 			PreparedStatement pst = conexion.conn.prepareStatement("SELECT * FROM ov_ordenesmuro");
 			ResultSet res = pst.executeQuery();
 			while (res.next()) {
@@ -1395,7 +1405,7 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 			conexion.conn.close();
 		} catch (SQLException e) {
 			log.log(Level.SEVERE, "Error cerrando conexion Muro: " + e.getMessage(), e);
-		}
+		}*/
 	}
 
 	public int actualizaClient() {

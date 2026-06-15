@@ -84,9 +84,11 @@ public class OrdenesB2CToRecarga extends SvrProcess
 
 		//	Delete Old Imported
 		
-			sql = new StringBuffer ("Update C_OrderB2c "
+			sql = new StringBuffer (
+					"DELETE FROM C_OrderB2c WHERE C_BPartner_ID<>1001237 AND processed = 'N'"
+					/*"Update C_OrderB2c "
 				  + "set PoReference=lpad(poreference,3,'') " +
-					"Where C_BPartner_ID<>1001237 and PoReference in (Select iob2c.documentno from i_orderb2c iob2c)");
+					"Where C_BPartner_ID<>1001237 and PoReference in (Select iob2c.documentno from i_orderb2c iob2c)"*/);
 			no = DB.executeUpdate(sql.toString(), get_TrxName());
 			log.fine("Ordenes Limpiadas =" + no);
 			
