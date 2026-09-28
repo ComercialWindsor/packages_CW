@@ -473,10 +473,23 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 		int qtyResEcom = resEcom[1];
 
 		if (reqLineIdEcom > 0 && cantPendiente.intValue() > 0) {
-			// FIX 2026-06-09 (FG): pre-check disponible real con FOR UPDATE lock
-			// evita race condition con otros batches y bloquea fila hasta commit
-			BigDecimal dispReal = getDisponibleRealConLock(reqLineIdEcom);
-			BigDecimal capacidad = dispReal.min(new BigDecimal(qtyResEcom));
+			// FIX 2026-07-07 (FG): consumo de reserva se limita por el CUPO REAL de la
+			// reqLine (Qty - SUM(OVs CO/IP/DR)) con FOR UPDATE lock, NO por el disponible
+			// fisico. La reserva ya aparto stock fisico al crearse; bloquearla por bodega
+			// tensa (check2) generaba deadlock: proceso caia a stock puro y el validador
+			// ModWindsorValidAvaiQtyOrder lo rechazaba ("Debe usar solicitud abierta").
+			// Vincular la reqLine hace que docValidate salte la linea (reqL>0).
+			BigDecimal room = getReservaRoomConLock(reqLineIdEcom);
+			BigDecimal capacidad = room.min(new BigDecimal(qtyResEcom));
+			// FIX 2026-07-30 (FG): no consumir la reserva si el disponible global del
+			// producto (qtyavailableopenvianum) ya esta negativo, aunque la reqLine
+			// tenga cupo propio. Bloquea hasta que se resuelva el negativo.
+			BigDecimal dispGlobalEcom = getDisponibleRealBodega(productId);
+			if (dispGlobalEcom.compareTo(BigDecimal.ZERO) < 0) {
+				log.warning("Producto " + productId + ": Ecom ReqLine=" + reqLineIdEcom
+					+ " NO se usa, disponible global negativo=" + dispGlobalEcom);
+				capacidad = BigDecimal.ZERO;
+			}
 			if (capacidad.compareTo(BigDecimal.ZERO) > 0) {
 				BigDecimal qtyUsar = cantPendiente.min(capacidad);
 				insertOrderLine(orderId, productId, uomId, precio, qtyUsar,
@@ -484,7 +497,7 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 				lineasInsertadas++;
 				cantPendiente = cantPendiente.subtract(qtyUsar);
 				log.info("Producto " + productId + ": Ecom aplicada qty=" + qtyUsar
-					+ " ReqLine=" + reqLineIdEcom + " dispReal=" + dispReal
+					+ " ReqLine=" + reqLineIdEcom + " room=" + room
 					+ " qtyResLeido=" + qtyResEcom + " Pendiente=" + cantPendiente);
 
 				if (cantPendiente.compareTo(BigDecimal.ZERO) <= 0) {
@@ -493,7 +506,7 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 				}
 			} else {
 				log.warning("Producto " + productId + ": Ecom ReqLine=" + reqLineIdEcom
-					+ " dispReal=" + dispReal + " <=0, skip (saturada por concurrencia)");
+					+ " room=" + room + " <=0, skip (reqLine sin cupo)");
 			}
 		}
 
@@ -505,9 +518,18 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 		int qtyResFis = resFisica[1];
 
 		if (reqLineIdFis > 0 && cantPendiente.intValue() > 0) {
-			// FIX 2026-06-09 (FG): pre-check disponible real con FOR UPDATE lock
-			BigDecimal dispReal = getDisponibleRealConLock(reqLineIdFis);
-			BigDecimal capacidad = dispReal.min(new BigDecimal(qtyResFis));
+			// FIX 2026-07-07 (FG): idem PASO 1, cupo real de la reqLine con FOR UPDATE.
+			BigDecimal room = getReservaRoomConLock(reqLineIdFis);
+			BigDecimal capacidad = room.min(new BigDecimal(qtyResFis));
+			// FIX 2026-07-30 (FG): no consumir la reserva si el disponible global del
+			// producto (qtyavailableopenvianum) ya esta negativo, aunque la reqLine
+			// tenga cupo propio. Bloquea hasta que se resuelva el negativo.
+			BigDecimal dispGlobalFis = getDisponibleRealBodega(productId);
+			if (dispGlobalFis.compareTo(BigDecimal.ZERO) < 0) {
+				log.warning("Producto " + productId + ": Fisica ReqLine=" + reqLineIdFis
+					+ " NO se usa, disponible global negativo=" + dispGlobalFis);
+				capacidad = BigDecimal.ZERO;
+			}
 			if (capacidad.compareTo(BigDecimal.ZERO) > 0) {
 				BigDecimal qtyUsar = cantPendiente.min(capacidad);
 				insertOrderLine(orderId, productId, uomId, precio, qtyUsar,
@@ -515,7 +537,7 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 				lineasInsertadas++;
 				cantPendiente = cantPendiente.subtract(qtyUsar);
 				log.info("Producto " + productId + ": Fisica aplicada qty=" + qtyUsar
-					+ " ReqLine=" + reqLineIdFis + " dispReal=" + dispReal
+					+ " ReqLine=" + reqLineIdFis + " room=" + room
 					+ " qtyResLeido=" + qtyResFis + " Pendiente=" + cantPendiente);
 
 				if (cantPendiente.compareTo(BigDecimal.ZERO) <= 0) {
@@ -524,7 +546,7 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 				}
 			} else {
 				log.warning("Producto " + productId + ": Fisica ReqLine=" + reqLineIdFis
-					+ " dispReal=" + dispReal + " <=0, skip (saturada por concurrencia)");
+					+ " room=" + room + " <=0, skip (reqLine sin cupo)");
 			}
 		}
 
@@ -545,18 +567,25 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 			markLineImported(codigo, tienda, odooId, orderId);
 			return lineasInsertadas;
 		} else {
-			// No hay stock suficiente para cubrir el pendiente
-			// Revertir TODAS las lineas parciales ya insertadas para este producto
+			// FIX 2026-07-07 (FG): stock insuficiente para cubrir el pendiente.
+			// Conservar líneas parciales ya asignadas; insertar noStock solo por el resto.
+			// Antes se revertían todas las parciales — ahora se aprovechan.
 			log.info("Producto " + productId + " sin stock suficiente. Disponible=" + stock
 				+ " Pedido=" + cantPendiente + " (original=" + cantOriginal + ")."
-				+ " Revirtiendo " + lineasInsertadas + " lineas parciales.");
-			if (lineasInsertadas > 0) {
-				revertOrderLinesForProduct(orderId, productId);
+				+ " Conservando " + lineasInsertadas + " lineas parciales."
+				+ " NoStock por=" + cantPendiente);
+			if (stock.compareTo(BigDecimal.ZERO) > 0) {
+				// Stock parcial: insertar lo que hay
+				insertOrderLine(orderId, productId, uomId, precio, stock,
+					contador + lineasInsertadas, 0);
+				lineasInsertadas++;
+				cantPendiente = cantPendiente.subtract(stock);
 			}
-			// Insertar linea con Qty=0, Demand=cantOriginal, NotPrint='Y'
-			insertOrderLineNoStock(orderId, productId, uomId, precio, cantOriginal, contador);
+			// Línea noStock por lo que no se pudo cubrir
+			insertOrderLineNoStock(orderId, productId, uomId, precio, cantPendiente,
+				contador + lineasInsertadas);
 			markLineImported(codigo, tienda, odooId, orderId);
-			return 1;
+			return lineasInsertadas + 1;
 		}
 	}
 
@@ -735,7 +764,9 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 
 			// === Fallo el primer intento: ir linea por linea ===
 			String docNo = order.getDocumentNo();
-			log.warning("Error al completar orden " + docNo + ". Buscando lineas problematicas...");
+			String procMsg = order.getProcessMsg();
+			log.warning("Error al completar orden " + docNo + ". Msg=" + procMsg
+				+ ". Buscando lineas problematicas...");
 
 			List /*<int[]>*/ lineas = getOrderLinesWithQty(orderId);
 			if (lineas.isEmpty()) {
@@ -750,7 +781,12 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 			while (intentos < maxIntentos) {
 				intentos++;
 
-				int[] lineaProblema = (int[]) lineas.get(0);
+				// FIX 2026-07-07 (FG): apuntar a la linea del PRODUCTO nombrado en el
+				// mensaje de error del validador, no a la de menor Line#. Evita destruir
+				// lineas inocentes (con reserva valida) como dano colateral.
+				int[] lineaProblema = pickOffendingLine(lineas, procMsg);
+				if (lineaProblema == null)
+					lineaProblema = (int[]) lineas.get(0); // fallback: no se pudo identificar
 				int orderLineId = lineaProblema[0];
 				int productId = lineaProblema[1];
 
@@ -774,6 +810,8 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 					log.info("Orden completada (intento " + intentos + "): " + docNo);
 					return;
 				}
+				// Actualizar msg para el siguiente intento (otro producto puede fallar)
+				procMsg = orderRetry.getProcessMsg();
 
 				lineas = getOrderLinesWithQty(orderId);
 				if (lineas.isEmpty()) {
@@ -822,6 +860,34 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 			closeQuietly(pst);
 		}
 		return result;
+	}
+
+	/**
+	 * FIX 2026-07-07 (FG): identifica cual de las lineas candidatas es la que el
+	 * validador rechazo, buscando el nombre o codigo del producto dentro del mensaje
+	 * de error (los validadores devuelven "...producto <name>..." / "Producto: <name>").
+	 * @return int[]{C_OrderLine_ID, M_Product_ID} de la linea culpable, o null si no se
+	 *         puede identificar (el llamador hace fallback a la primera).
+	 */
+	private int[] pickOffendingLine(List /*<int[]>*/ lineas, String procMsg) {
+		if (procMsg == null || procMsg.trim().length() == 0 || lineas == null || lineas.isEmpty())
+			return null;
+		String msg = procMsg.toUpperCase();
+		for (int i = 0; i < lineas.size(); i++) {
+			int[] l = (int[]) lineas.get(i);
+			int productId = l[1];
+			String nombre = DB.getSQLValueString(get_TrxName(),
+				"SELECT Name FROM M_Product WHERE M_Product_ID = " + productId);
+			String valor = DB.getSQLValueString(get_TrxName(),
+				"SELECT Value FROM M_Product WHERE M_Product_ID = " + productId);
+			if (nombre != null && nombre.trim().length() > 0
+					&& msg.indexOf(nombre.trim().toUpperCase()) >= 0)
+				return l;
+			if (valor != null && valor.trim().length() > 0
+					&& msg.indexOf(valor.trim().toUpperCase()) >= 0)
+				return l;
+		}
+		return null;
 	}
 
 	/**
@@ -953,6 +1019,14 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 		PreparedStatement ps = null;
 		ResultSet rs = null;
 		try {
+			// FIX 2026-07-08 (FG): pre-calcular cap bodega fuera del FOR UPDATE lock.
+			BigDecimal dispBodega = DB.getSQLValueBD(get_TrxName(),
+				"SELECT NVL(qtyavailableopenvianum(M_Product_ID),0)" +
+				" FROM M_RequisitionLine WHERE M_RequisitionLine_ID=" + reqLineId,
+				new Object[0]);
+			if (dispBodega == null) dispBodega = BigDecimal.ZERO;
+			if (dispBodega.compareTo(BigDecimal.ZERO) < 0) dispBodega = BigDecimal.ZERO;
+
 			String sql = "SELECT LEAST(" +
 				" rl.Qty - NVL((" +
 				"   SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
@@ -960,12 +1034,11 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 				"   WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
 				"     AND o.DocStatus IN ('CO','IP','DR')" +
 				" ), 0)," +
-				" GREATEST(0, NVL(qtyavailableopenvianum(rl.M_Product_ID), 0) + rl.QtyReserved)" +
+				" GREATEST(0, " + dispBodega.toPlainString() + " + rl.QtyReserved)" +
 				") AS disponible" +
 				" FROM M_RequisitionLine rl" +
-				" WHERE rl.M_RequisitionLine_ID = ? FOR UPDATE";
+				" WHERE rl.M_RequisitionLine_ID = " + reqLineId + " FOR UPDATE";
 			ps = DB.prepareStatement(sql, get_TrxName());
-			ps.setInt(1, reqLineId);
 			rs = ps.executeQuery();
 			if (rs.next()) {
 				BigDecimal d = rs.getBigDecimal("disponible");
@@ -974,6 +1047,44 @@ public class ProcesarOVMuroOdoo extends SvrProcess {
 			return BigDecimal.ZERO;
 		} catch (Exception e) {
 			log.log(Level.SEVERE, "getDisponibleRealConLock ReqLine=" + reqLineId
+				+ " err=" + e.getMessage(), e);
+			return BigDecimal.ZERO;
+		} finally {
+			closeQuietly(rs);
+			closeQuietly(ps);
+		}
+	}
+
+	// FIX 2026-07-07 (FG): cupo real de una reqLine para consumo de RESERVA.
+	// Devuelve GREATEST(0, Qty - SUM(OVs CO/IP/DR)) con FOR UPDATE lock.
+	// Es el espacio no comprometido en la linea; consumir la reserva hasta aqui
+	// NO puede exceder Qty (evita "Cantidad Supera Cantidad de Solicitud") y NO se
+	// bloquea por bodega fisica tensa: la reserva ya aparto ese stock al crearse.
+	private BigDecimal getReservaRoomConLock(int reqLineId) {
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		try {
+			// FIX 2026-08-06 (FG): el calculo anterior restaba el historico COMPLETO de
+			// QtyDelivered de OVs cerradas (CL) contra el Qty original de la reqLine.
+			// Para reqLines viejas reutilizadas por años (ej. pool 2020 con decenas de OVs
+			// cerradas encima), ese acumulado historico supera el Qty original hace tiempo
+			// y el GREATEST(0,...) quedaba clavado en 0 para siempre, aunque QtyReserved
+			// (mantenido correctamente por ModWindsorUpdateReserved) mostrara saldo sano.
+			// QtyReserved YA es el cupo real vigente; el FOR UPDATE evita la condicion de
+			// carrera que motivo el fix anterior, sin recalcular desde el historico.
+			String sql = "SELECT rl.QtyReserved AS room" +
+				" FROM M_RequisitionLine rl" +
+				" WHERE rl.M_RequisitionLine_ID = ? FOR UPDATE";
+			ps = DB.prepareStatement(sql, get_TrxName());
+			ps.setInt(1, reqLineId);
+			rs = ps.executeQuery();
+			if (rs.next()) {
+				BigDecimal d = rs.getBigDecimal("room");
+				return d == null ? BigDecimal.ZERO : d;
+			}
+			return BigDecimal.ZERO;
+		} catch (Exception e) {
+			log.log(Level.SEVERE, "getReservaRoomConLock ReqLine=" + reqLineId
 				+ " err=" + e.getMessage(), e);
 			return BigDecimal.ZERO;
 		} finally {

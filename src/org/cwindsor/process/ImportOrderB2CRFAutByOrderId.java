@@ -53,7 +53,7 @@ import org.compiere.util.Trx;
  * @version $Id: ImportOrder.java,v 1.2 2006/07/30 00:51:02 jjanke Exp $
  */
 public class ImportOrderB2CRFAutByOrderId extends SvrProcess {
-	// Nuevo parámetro recibido desde OVMuroNotProcessed
+	// Nuevo parï¿½metro recibido desde OVMuroNotProcessed
 	private int p_C_Order_ID = 0;
 
 	/** Client to be imported to */
@@ -136,7 +136,7 @@ public class ImportOrderB2CRFAutByOrderId extends SvrProcess {
 	 * @throws Exception
 	 */
 	protected String doIt() throws java.lang.Exception {
-		// Validación del parámetro requerido
+		// Validaciï¿½n del parï¿½metro requerido
 		if (p_C_Order_ID <= 0) return "Debe recibir C_Order_ID > 0";
 
 		String menj1 = null, menj2 = null, menj3 = null,menj4 = null, menj5=null, menj6=null, menj7 = null;
@@ -784,20 +784,26 @@ public class ImportOrderB2CRFAutByOrderId extends SvrProcess {
 															ejecutarSQL(insertOrderLine);
 															contador++;
 															
-															if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) {
-																// Actualizar qtyused de m_requisitionline
-																String sqlUpRL = "SELECT SUM(QTYENTERED) "
-																		+ " FROM C_OrderLine col"
-																		+ " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
-																		+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
-																BigDecimal amt = DB.getSQLValueBD(get_TrxName(), sqlUpRL);
-																if (amt == null)
-																	amt = Env.ZERO;
-																String update = "UPDATE M_RequisitionLine"
-																		+ " SET QtyUsed = " + amt
-																		+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
-																ejecutarSQL(update);
-															}
+															// FIX 2026-07-20 (FG): UPDATE de QtyUsed DESACTIVADO (mismo fix que
+															// ImportOrderB2CRFAutOdoo 2026-06-09). Escribia solo QtyUsed con formula
+															// SUM(QtyEntered DR/IP/CO/CL/IN), divergente del ModelValidator
+															// ModWindsorUpdateReserved y sin ajustar QtyReserved/Qty
+															// -> dejaba disponible negativo.
+															// El validator AFTER_COMPLETE de la OV es la unica fuente de verdad.
+															// if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) {
+															//	// Actualizar qtyused de m_requisitionline
+															//	String sqlUpRL = "SELECT SUM(QTYENTERED) "
+															//			+ " FROM C_OrderLine col"
+															//			+ " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
+															//			+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
+															//	BigDecimal amt = DB.getSQLValueBD(get_TrxName(), sqlUpRL);
+															//	if (amt == null)
+															//		amt = Env.ZERO;
+															//	String update = "UPDATE M_RequisitionLine"
+															//			+ " SET QtyUsed = " + amt
+															//			+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
+															//	ejecutarSQL(update);
+															// }
 															
 															String updateOrderB2CLine = "UPDATE C_OrderB2CLine"
 																	+ " SET C_Order_ID = "+orderId+", Processed = 'Y', c_orderline_id = "+orderLineId

@@ -181,10 +181,10 @@ public class ModWindsorUpdateReserved implements ModelValidator
 		}
 
 		// Al completar la requisicion:
-		// FIX 2026-06-09 (FG): semantica correcta:
-		//   QtyUsed     = SUM(QtyDelivered) de OVs CO/CL/IP  (lo realmente entregado)
-		//   QtyReserved = SUM(QtyOrdered - QtyDelivered) de OVs CO/IP  (comprometido pendiente, CL ya cerrada)
-		// Antes: qtyUsed=SUM(QtyOrdered) y qtyReserved=Qty-qtyUsed -> daba "libre", no "reservado"
+		// FIX 2026-07-09 (FG): formula unificada con ImportFileRFUpdate:
+		//   QtyUsed     = SUM(QtyDelivered CO) + SUM(QtyReserved CO/IP)  de C_OrderLine
+		//   QtyReserved = 0  (ya absorbido en QtyUsed, evita double-count)
+		// FIX 2026-07-07 (FG): req nueva sin OVs -> reservar MIN(Qty, qtyavailableopenvianum)
 		if(timing == TIMING_AFTER_COMPLETE && po.get_Table_ID()== MRequisition.Table_ID)
 		{
 			MRequisition req = (MRequisition) po;
@@ -194,34 +194,51 @@ public class ModWindsorUpdateReserved implements ModelValidator
 				for (int i = 0; i < rLines.length; i++)
 				{
 					MRequisitionLine rLine = rLines[i];
-					BigDecimal qtyUsed = DB.getSQLValueBD(req.get_TrxName(),
+					// FIX 2026-08-03 (FG): saltar productos no-stock/servicio (ej: Transporte)
+					if(rLine.getM_Product_ID() <= 0 || !rLine.getM_Product().isStocked()
+							|| rLine.getM_Product().getProductType().compareTo("I") != 0)
+						continue;
+					BigDecimal qtyDeliveredCO = DB.getSQLValueBD(req.get_TrxName(),
 							"SELECT COALESCE(SUM(NVL(co.QtyDelivered,0)),0)" +
 							" FROM C_OrderLine co" +
 							" INNER JOIN C_Order col ON (col.C_Order_ID = co.C_Order_ID)" +
-							" WHERE col.DocStatus IN ('CO','CL','IP')" +
+							" WHERE col.DocStatus = 'CO'" +
 							" AND co.M_RequisitionLine_ID = ?",
 							rLine.get_ID());
-					if(qtyUsed == null)
-						qtyUsed = Env.ZERO;
-					BigDecimal qtyReserved = DB.getSQLValueBD(req.get_TrxName(),
-							"SELECT COALESCE(SUM(co.QtyOrdered - NVL(co.QtyDelivered,0)),0)" +
+					if(qtyDeliveredCO == null) qtyDeliveredCO = Env.ZERO;
+					BigDecimal qtyReservedOL = DB.getSQLValueBD(req.get_TrxName(),
+							"SELECT COALESCE(SUM(NVL(co.QtyReserved,0)),0)" +
 							" FROM C_OrderLine co" +
 							" INNER JOIN C_Order col ON (col.C_Order_ID = co.C_Order_ID)" +
 							" WHERE col.DocStatus IN ('CO','IP')" +
 							" AND co.M_RequisitionLine_ID = ?",
 							rLine.get_ID());
-					if(qtyReserved == null)
-						qtyReserved = Env.ZERO;
-					if(qtyReserved.compareTo(Env.ZERO) < 0)
-						qtyReserved = Env.ZERO;
+					if(qtyReservedOL == null) qtyReservedOL = Env.ZERO;
+					BigDecimal qtyUsed = qtyDeliveredCO.add(qtyReservedOL);
 					BigDecimal oldRes = toBD(rLine.get_Value("QtyReserved"));
 					BigDecimal oldUsed = toBD(rLine.get_Value("QtyUsed"));
-					BigDecimal reqQty = toBD(rLine.get_Value("Qty"));
-					auditReserva(po, rLine.get_ID(), oldRes, oldUsed, qtyReserved, qtyUsed,
+					BigDecimal reqQty = rLine.getQty();
+					BigDecimal newRes = reqQty.subtract(qtyUsed);
+					if (newRes.compareTo(Env.ZERO) < 0) newRes = Env.ZERO;
+					// FIX 2026-08-27 (FG): topar al disponible fisico real (ver capReservaFisica)
+					newRes = capReservaFisica(newRes, oldRes, rLine.getM_Product_ID(), req.get_TrxName());
+					// FIX 2026-08-27 (FG): invariante del modelo (ver reserva.md): Qty = QtyUsed +
+					// QtyReserved siempre. Si el cap de arriba redujo newRes por debajo de
+					// (reqQty-qtyUsed), Qty debe bajar con el, si no la reqline queda pidiendo
+					// mas de lo que fisicamente se puede respaldar. Cuando no hubo cap, esto da
+					// exactamente reqQty (no-op).
+					BigDecimal newQty = qtyUsed.add(newRes);
+					auditReserva(po, rLine.get_ID(), oldRes, oldUsed, newRes, qtyUsed,
 							"REQ_AFTER_COMPLETE", req.get_ID(), req.getDocumentNo(), req.getDocStatus(), reqQty);
-					rLine.set_CustomColumn("QtyReserved", qtyReserved);
-					rLine.set_CustomColumn("QtyUsed", qtyUsed);
-					rLine.save();
+					// FIX 2026-08-27 (FG): tocar Updated/UpdatedBy tambien -- el UPDATE directo
+					// (que bypasea save() a proposito por performance, ver FIX_SUMMARY_QTYAVAIL_v1.md)
+					// dejaba el timestamp congelado y Z_ReservaAuditLog era la unica fuente
+					// confiable de "cuando cambio realmente" QtyReserved/QtyUsed.
+					DB.executeUpdate("UPDATE M_RequisitionLine SET QtyUsed = "+qtyUsed+
+							", QtyReserved = "+newRes+
+							", Qty = "+newQty+
+							", Updated = SYSDATE, UpdatedBy = "+Env.getAD_User_ID(po.getCtx())+
+							" WHERE M_RequisitionLine_ID = "+rLine.get_ID(), po.get_TrxName());
 				}
 			}
 		}
@@ -230,12 +247,13 @@ public class ModWindsorUpdateReserved implements ModelValidator
 		{
 			MRequisition req = (MRequisition) po;
 			if(req.isSOTrx())
-				DB.executeUpdate("UPDATE M_RequisitionLine SET QtyReserved = 0 WHERE M_Requisition_ID = "+req.get_ID(), po.get_TrxName());
+				DB.executeUpdate("UPDATE M_RequisitionLine SET QtyReserved = 0, Updated = SYSDATE, UpdatedBy = "
+						+Env.getAD_User_ID(po.getCtx())+" WHERE M_Requisition_ID = "+req.get_ID(), po.get_TrxName());
 		}
-		// Al completar / anular / reactivar una OV: recalcular QtyReserved y QtyUsed de la req line
-		// FIX 2026-06-09 (FG): semantica correcta:
-		//   QtyUsed     = SUM(QtyDelivered) de OVs CO/CL/IP
-		//   QtyReserved = SUM(QtyOrdered - QtyDelivered) de OVs CO/IP (CL ya cerrada, sin pendiente)
+		// Al completar / anular / reactivar una OV: recalcular QtyUsed de la req line
+		// FIX 2026-07-09 (FG): formula unificada:
+		//   QtyUsed     = SUM(QtyDelivered CO) + SUM(QtyReserved CO/IP)  de C_OrderLine
+		//   QtyReserved = NO se modifica (gestionado por import/manual/anulacion OV)
 		if((timing == TIMING_AFTER_COMPLETE || timing == TIMING_AFTER_VOID
 				|| timing == TIMING_AFTER_REACTIVATE) && po.get_Table_ID()== MOrder.Table_ID)
 		{
@@ -246,47 +264,65 @@ public class ModWindsorUpdateReserved implements ModelValidator
 				if (timing == TIMING_AFTER_COMPLETE) trigger = "ORDER_AFTER_COMPLETE";
 				else if (timing == TIMING_AFTER_VOID) trigger = "ORDER_AFTER_VOID";
 				else trigger = "ORDER_AFTER_REACTIVATE";
+				// FIX 2026-07-29 (FG): en AFTER_COMPLETE/REACTIVATE la fila C_Order en BD puede
+				// seguir en DR/IP (ordenes creadas por import via SQL directo: el DocStatus CO
+				// solo existe en memoria hasta el save posterior), por lo que el filtro por
+				// DocStatus excluia la propia orden y no se rebajaba la reserva. Se incluye la
+				// orden en curso explicitamente. En AFTER_VOID es al reves: BD aun dice CO, se excluye.
+				String condDeliv, condRes;
+				if (timing == TIMING_AFTER_VOID)
+				{
+					condDeliv = "(col.DocStatus = 'CO' AND col.C_Order_ID <> " + order.get_ID() + ")";
+					condRes   = "(col.DocStatus IN ('CO','IP') AND col.C_Order_ID <> " + order.get_ID() + ")";
+				}
+				else
+				{
+					condDeliv = "(col.DocStatus = 'CO' OR col.C_Order_ID = " + order.get_ID() + ")";
+					condRes   = "(col.DocStatus IN ('CO','IP') OR col.C_Order_ID = " + order.get_ID() + ")";
+				}
 				MOrderLine[] oLines = order.getLines(false, null);
 				for (int i = 0; i < oLines.length; i++)
 				{
 					MOrderLine oLine = oLines[i];
-					if(oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
+					// FIX 2026-08-03 (FG): saltar productos no-stock/servicio (ej: Transporte)
+					if(oLine.getM_Product_ID() > 0 && oLine.getM_Product().isStocked()
+							&& oLine.getM_Product().getProductType().compareTo("I") == 0
+							&& oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
 					{
 						MRequisitionLine rLine = new MRequisitionLine(po.getCtx(), oLine.get_ValueAsInt("M_RequisitionLine_ID"), po.get_TrxName());
 
-						/*BigDecimal qtyUsed = DB.getSQLValueBD(po.get_TrxName(),
+						BigDecimal qtyDeliveredCO = DB.getSQLValueBD(po.get_TrxName(),
 								"SELECT COALESCE(SUM(NVL(co.QtyDelivered,0)),0)" +
 								" FROM C_OrderLine co" +
 								" INNER JOIN C_Order col ON (col.C_Order_ID = co.C_Order_ID)" +
-								" WHERE col.DocStatus IN ('CO','CL','IP') AND co.M_RequisitionLine_ID = ?",
+								" WHERE " + condDeliv + " AND co.M_RequisitionLine_ID = ?",
 								rLine.get_ID());
-						if(qtyUsed == null)
-							qtyUsed = Env.ZERO;*/
-						BigDecimal qtyUsed =DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(QtyOrdered)" +
+						if(qtyDeliveredCO == null) qtyDeliveredCO = Env.ZERO;
+						BigDecimal qtyReservedOL = DB.getSQLValueBD(po.get_TrxName(),
+								"SELECT COALESCE(SUM(NVL(co.QtyReserved,0)),0)" +
 								" FROM C_OrderLine co" +
 								" INNER JOIN C_Order col ON (col.C_Order_ID = co.C_Order_ID)" +
-								" WHERE DocStatus IN ('CO','CL','IP') AND M_RequisitionLine_ID = ?",rLine.get_ID());
-						if(qtyUsed == null)							
-							qtyUsed = Env.ZERO;
-						/*BigDecimal qtyReserved = DB.getSQLValueBD(po.get_TrxName(),
-								"SELECT COALESCE(SUM(co.QtyOrdered - NVL(co.QtyDelivered,0)),0)" +
-								" FROM C_OrderLine co" +
-								" INNER JOIN C_Order col ON (col.C_Order_ID = co.C_Order_ID)" +
-								" WHERE col.DocStatus IN ('CO','IP') AND co.M_RequisitionLine_ID = ?",
-								rLine.get_ID());*/
-						BigDecimal qtyReserved = rLine.getQty().subtract(qtyUsed); 
-						if(qtyReserved == null)
-							qtyReserved = Env.ZERO;
-						if(qtyReserved.compareTo(Env.ZERO) < 0)
-							qtyReserved = Env.ZERO;
+								" WHERE " + condRes + " AND co.M_RequisitionLine_ID = ?",
+								rLine.get_ID());
+						if(qtyReservedOL == null) qtyReservedOL = Env.ZERO;
+						BigDecimal qtyUsed = qtyDeliveredCO.add(qtyReservedOL);
 						BigDecimal oldRes = toBD(rLine.get_Value("QtyReserved"));
 						BigDecimal oldUsed = toBD(rLine.get_Value("QtyUsed"));
-						BigDecimal reqQty = toBD(rLine.get_Value("Qty"));
-						auditReserva(po, rLine.get_ID(), oldRes, oldUsed, qtyReserved, qtyUsed,
+						BigDecimal reqQty = rLine.getQty();
+						BigDecimal newRes = reqQty.subtract(qtyUsed);
+						if (newRes.compareTo(Env.ZERO) < 0) newRes = Env.ZERO;
+						// FIX 2026-08-27 (FG): topar al disponible fisico real (ver capReservaFisica)
+						newRes = capReservaFisica(newRes, oldRes, rLine.getM_Product_ID(), po.get_TrxName());
+						// FIX 2026-08-27 (FG): invariante Qty = QtyUsed + QtyReserved (ver nota en
+						// bloque REQ_AFTER_COMPLETE) -- no-op si no hubo cap.
+						BigDecimal newQty = qtyUsed.add(newRes);
+						auditReserva(po, rLine.get_ID(), oldRes, oldUsed, newRes, qtyUsed,
 								trigger, order.get_ID(), order.getDocumentNo(), order.getDocStatus(), reqQty);
-						/*DB.executeUpdate("UPDATE M_RequisitionLine SET QtyReserved = "+oldRes.subtract(qtyReserved)+", QtyUsed = "+reqQty.subtract(oldRes.subtract(qtyReserved))+
-								" WHERE M_RequisitionLine_ID = "+rLine.get_ID(), po.get_TrxName());*/
-						DB.executeUpdate("UPDATE M_RequisitionLine SET QtyReserved = "+qtyReserved+", qtyUsed = " +qtyUsed+
+						// FIX 2026-08-27 (FG): tocar Updated/UpdatedBy (ver nota en bloque REQ_AFTER_COMPLETE)
+						DB.executeUpdate("UPDATE M_RequisitionLine SET QtyUsed = "+qtyUsed+
+								", QtyReserved = "+newRes+
+								", Qty = "+newQty+
+								", Updated = SYSDATE, UpdatedBy = "+Env.getAD_User_ID(po.getCtx())+
 								" WHERE M_RequisitionLine_ID = "+rLine.get_ID(), po.get_TrxName());
 					}
 				}
@@ -327,6 +363,36 @@ public class ModWindsorUpdateReserved implements ModelValidator
 		if (v == null) return Env.ZERO;
 		if (v instanceof BigDecimal) return (BigDecimal) v;
 		try { return new BigDecimal(v.toString()); } catch (Exception e) { return Env.ZERO; }
+	}
+
+	// FIX 2026-08-27 (FG): topa QtyReserved al disponible fisico real. Causa raiz del
+	// salto masivo del 2026-08-26 (producto 822120 paso de reserva 2883 a 32464 en un
+	// dia): M_RequisitionLine.Qty se duplico (30573->60155) por el import Muro/B2C, no
+	// la formula CO/IP. Esta funcion es la red de seguridad final, independiente de esa
+	// causa (que hay que investigar aparte en ProcesarOVMuroOdoo/ImportOrderB2CRFAutOdoo):
+	// la reserva jamas puede subir por sobre lo que hay fisicamente en bodega.
+	//
+	// OJO PERFORMANCE: qtyavailableopenvianum() es la misma funcion que causo lock
+	// contention severa (153.000 llamadas/2h) resuelta en FIX_SUMMARY_QTYAVAIL_v1.md
+	// al sacar rLine.save() del flujo. Por eso SOLO se llama cuando la reserva
+	// efectivamente sube (newRes > oldRes) -- que es el unico caso que hay que topar.
+	// Cuando baja o queda igual (el caso normal, la gran mayoria de los completar)
+	// se sale de inmediato sin tocar la funcion cara.
+	private BigDecimal capReservaFisica(BigDecimal newRes, BigDecimal oldRes, int productId, String trxName)
+	{
+		if (newRes.compareTo(oldRes) <= 0) return newRes;	// no sube: nada que topar, no llamar la funcion cara
+
+		BigDecimal disponible = DB.getSQLValueBD(trxName, "SELECT qtyavailableopenvianum(?) FROM DUAL", productId);
+		if (disponible == null) disponible = Env.ZERO;
+		BigDecimal cap = oldRes.add(disponible);
+		if (newRes.compareTo(cap) > 0)
+		{
+			log.warning("ReservaCap: producto=" + productId + " newRes=" + newRes + " > cap=" + cap
+					+ " (oldRes=" + oldRes + " disponible=" + disponible + ") -> se topa a cap");
+			newRes = cap;
+		}
+		if (newRes.compareTo(Env.ZERO) < 0) newRes = Env.ZERO;
+		return newRes;
 	}
 
 	// FIX 2026-06-09 (FG): registra cada movimiento QtyReserved/QtyUsed en Z_ReservaAuditLog

@@ -504,7 +504,7 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 											pstmtre = null;
 										}
 
-										// ====== desde aquí, tu lógica original sigue igual ======
+										// ====== desde aquï¿½, tu lï¿½gica original sigue igual ======
 										// (solo se ajustaron cierres con DB.close(rs, ps) donde corresponde)
 
 										if (salto == 0 || salto == 2) {
@@ -783,7 +783,7 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 												ResultSet rslines = null;
 
 												// ==========
-												// Trx ÚNICA por documento (C_Order + líneas + updates)
+												// Trx ï¿½NICA por documento (C_Order + lï¿½neas + updates)
 												// ==========
 												Trx trxDoc = null;
 
@@ -842,20 +842,26 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 															ejecutarSQL(insertOrderLine, trxDoc);
 															contador++;
 
-															if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) {
-																String sqlUpRL = "SELECT SUM(QTYENTERED) "
-																		+ " FROM C_OrderLine col"
-																		+ " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
-																		+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
-																BigDecimal amt = DB.getSQLValueBD(trxDoc.getTrxName(), sqlUpRL);
-																if (amt == null)
-																	amt = Env.ZERO;
-
-																String update = "UPDATE M_RequisitionLine"
-																		+ " SET QtyUsed = " + amt
-																		+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
-																ejecutarSQL(update, trxDoc);
-															}
+															// FIX 2026-07-20 (FG): UPDATE de QtyUsed DESACTIVADO (mismo fix que
+															// ImportOrderB2CRFAutOdoo 2026-06-09). Escribia solo QtyUsed con formula
+															// SUM(QtyEntered DR/IP/CO/CL/IN), divergente del ModelValidator
+															// ModWindsorUpdateReserved (SUM QtyDelivered CO + QtyReserved CO/IP)
+															// y sin ajustar QtyReserved/Qty -> dejaba disponible negativo.
+															// El validator AFTER_COMPLETE de la OV es la unica fuente de verdad.
+															// if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) {
+															//	String sqlUpRL = "SELECT SUM(QTYENTERED) "
+															//			+ " FROM C_OrderLine col"
+															//			+ " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
+															//			+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
+															//	BigDecimal amt = DB.getSQLValueBD(trxDoc.getTrxName(), sqlUpRL);
+															//	if (amt == null)
+															//		amt = Env.ZERO;
+															//
+															//	String update = "UPDATE M_RequisitionLine"
+															//			+ " SET QtyUsed = " + amt
+															//			+ " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
+															//	ejecutarSQL(update, trxDoc);
+															// }
 
 															String updateOrderB2CLine = "UPDATE C_ORDERB2CLINEAUT"
 																	+ " SET C_Order_ID = " + orderId + ", Processed = 'Y', c_orderline_id = " + orderLineId
@@ -882,9 +888,9 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 															orderId = 0;
 															documentNo++;
 														}
-													} // while líneas
+													} // while lï¿½neas
 
-													// Completa el último documento abierto
+													// Completa el ï¿½ltimo documento abierto
 													order = new MOrder(getCtx(), orderId, trxDoc.getTrxName());
 													order.calculateTaxTotal();
 													order.saveEx();
@@ -1081,8 +1087,8 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 	}
 
 	/**
-	 * Ejecuta SQL manteniendo tu lógica original (crea trx propia).
-	 * OJO: Esto sigue existiendo porque lo ocupas en muchas partes del flujo “staging”.
+	 * Ejecuta SQL manteniendo tu lï¿½gica original (crea trx propia).
+	 * OJO: Esto sigue existiendo porque lo ocupas en muchas partes del flujo ï¿½stagingï¿½.
 	 */
 	private void ejecutarSQL(String sql) {
 		Trx trx = Trx.get(Trx.createTrxName("newTrx"), true);
@@ -1100,8 +1106,8 @@ public class ImportOrderB2CRFAut extends SvrProcess {
 	}
 
 	/**
-	 * NUEVO: Ejecuta SQL usando la MISMA trx (para no crear una transacción por línea).
-	 * Se usa en la creación de C_Order + C_OrderLine + updates por documento.
+	 * NUEVO: Ejecuta SQL usando la MISMA trx (para no crear una transacciï¿½n por lï¿½nea).
+	 * Se usa en la creaciï¿½n de C_Order + C_OrderLine + updates por documento.
 	 */
 	private void ejecutarSQL(String sql, Trx trx) {
 		if (trx == null)

@@ -97,10 +97,20 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 				return null;
 			MOrder order = oLine.getParent();
 			//que valide en borrador e invalido antes solo lo hacia en borrador
-			if(order.isSOTrx() && (order.getDocStatus().compareTo("CO") != 0 && order.getDocStatus().compareTo("IP") != 0)
+			// FIX 2026-07-30 (FG): se incluye doctype 1000568 (Orden de Venta-Boleta, canal
+			// Internet/Odoo) que quedaba fuera de esta validacion. Las OV-Boleta sin
+			// M_RequisitionLine_ID se sobrevendian sin ningun chequeo de disponible porque
+			// el filtro original solo cubria 1000030 (Orden de Venta normal).
+			// FIX 2026-08-03 (FG): se saca la exclusion de DocStatus='IP'. Al reactivar una
+			// OV completada, DocStatus queda en 'IP'; con la exclusion anterior, editar
+			// QtyOrdered en ese estado se saltaba esta validacion por completo (hueco usado
+			// para dejar en 0, completar, reactivar y luego poner cantidad sin control).
+			// El guard is_ValueChanged("QtyOrdered") de mas arriba ya evita revalidar cuando
+			// el guardado no cambia la cantidad (ej: eventos de despacho).
+			if(order.isSOTrx() && order.getDocStatus().compareTo("CO") != 0
 					&& order.getC_DocTypeTarget().getDocSubTypeSO().compareTo("SO") == 0
-					&& order.getC_DocTypeTarget_ID() == 1000030 
-					&& order.getAD_Client_ID() == 1000000) 
+					&& (order.getC_DocTypeTarget_ID() == 1000030 || order.getC_DocTypeTarget_ID() == 1000568)
+					&& order.getAD_Client_ID() == 1000000)
 					//&& order.getDocStatus().compareTo("IN") != 0))
 			{
 				if(oLine.getM_Product_ID() > 0 && oLine.getM_Product().isStocked()
@@ -110,21 +120,89 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 					if(oLine.get_ValueAsBoolean("NotPrint") && oLine.getQtyEntered().compareTo(Env.ZERO) == 0)
 						;
 					else
-					{	
+					{
+						// FIX 2026-08-03 (FG): ordenes MarketPlace (C_Order.FormaCompra='Marketplace')
+						// tienen regla propia y exclusiva: primero se valida SOLO contra la reserva
+						// ecommerce general M_Requisition.DocumentNo='901541' (pool compartido,
+						// OverWriteRequisition='Y', ~1700 productos, bodega Lampa). Si no hay cupo
+						// ahi, recien se consulta el disponible de bodega (qtyavailableopenvianum).
+						// No aplican las demas reglas de este validador (OV Volumen, bodegas
+						// especiales, mismo cliente/direccion, etc) salvo que la linea ya tenga
+						// su propia reserva fisica asignada (M_RequisitionLine_ID>0): en ese caso
+						// se valida contra ESA reserva puntual, no contra el pool generico 901541.
+						// FIX 2026-08-04 (FG): antes esta rama entraba siempre que FormaCompra=
+						// 'Marketplace', ignorando una reqLine propia ya vinculada a la linea
+						// (ej: 1096878 con cupo propio) y bloqueando contra el pool 901541 aunque
+						// este estuviera agotado/negativo. Ahora solo aplica el chequeo de pool
+						// cuando la linea NO tiene reqline propia; si la tiene, cae al chequeo
+						// normal de reqline mas abajo.
+						if("Marketplace".equals(order.get_ValueAsString("FormaCompra"))
+								&& oLine.get_ValueAsInt("M_RequisitionLine_ID") <= 0)
+						{
+							BigDecimal roomReserva = DB.getSQLValueBD(po.get_TrxName(),
+									"SELECT NVL(rl.Qty - rl.QtyUsed,0) - NVL((" +
+									"  SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
+									"  JOIN C_Order o2 ON o2.C_Order_ID = co.C_Order_ID" +
+									"  WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
+									"    AND o2.DocStatus NOT IN ('VO')" +
+									"    AND co.C_OrderLine_ID <> "+oLine.get_ID() +
+									"), 0)" +
+									" FROM M_RequisitionLine rl" +
+									" JOIN M_Requisition r ON r.M_Requisition_ID = rl.M_Requisition_ID" +
+									" WHERE r.DocumentNo = '901541' AND rl.M_Product_ID = "+oLine.getM_Product_ID());
+							if(roomReserva == null) roomReserva = Env.ZERO;
+
+							if(roomReserva.compareTo(oLine.getQtyOrdered()) >= 0)
+								return null;
+
+							BigDecimal dispBodega = DB.getSQLValueBD(po.get_TrxName(),
+									"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+							if(dispBodega == null) dispBodega = Env.ZERO;
+
+							if(dispBodega.compareTo(oLine.getQtyOrdered()) < 0)
+								return "ERROR: Stock Insuficiente. Reserva Ecommerce 901541 ("+roomReserva.intValue()
+										+") y Disponible de bodega ("+dispBodega.intValue()+") no cubren la cantidad para "
+										+oLine.getM_Product().getValue()+" - "+oLine.getM_Product().getName()+". <LC: MKTPLACE>";
+
+							return null;
+						}
 						//validaciones nuevas
 						//ininoles 27-06 nueva logica pedida por fernando
 						if(oLine.get_ValueAsInt("M_RequisitionLine_ID")>0)
 						{
 							//se revisa que no supere cantidad de solicitud
-							MRequisitionLine rLine = new MRequisitionLine(po.getCtx(), oLine.get_ValueAsInt("M_RequisitionLine_ID"), po.get_TrxName());							
+							MRequisitionLine rLine = new MRequisitionLine(po.getCtx(), oLine.get_ValueAsInt("M_RequisitionLine_ID"), po.get_TrxName());
+							// FIX 2026-07-30 (FG): aunque la reserva fisica (M_RequisitionLine) tenga
+							// cupo propio, no se debe grabar la linea si el disponible global del
+							// producto (qtyavailableopenvianum) ya esta negativo. Bloquea hasta que
+							// se resuelva el negativo (ajuste de stock, liberacion de otra reserva, etc).
+							BigDecimal dispGlobal = DB.getSQLValueBD(po.get_TrxName(),
+									"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+							if(dispGlobal != null && dispGlobal.compareTo(Env.ZERO) < 0)
+								return "ERROR: Disponible negativo ("+dispGlobal.intValue()+") para "
+										+oLine.getM_Product().getValue()+" - "+oLine.getM_Product().getName()
+										+". Debe resolver el negativo antes de vender contra esta reserva. <LC: FIX-DISPNEG>";
 							//nuevo calculo para disponible
-							BigDecimal qtyUsed = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM (QtyOrdered) FROM C_OrderLine col " +
+							// FIX 2026-08-04 (FG): formula anterior sumaba QtyOrdered de TODAS las
+							// lineas vinculadas con DocStatus NOT IN ('VO') -- eso incluye OVs 'CL'
+							// (cerradas, historicas) y 'CO' (completadas), que YA estan reflejadas en
+							// rLine.QtyUsed/QtyReserved (mantenidos por ModWindsorUpdateReserved segun
+							// invariante Qty=QtyUsed+QtyReserved). Sumarlas de nuevo aca duplicaba el
+							// consumo y en reqlines con mucho historial (ej: cientos de OVs CL) el
+							// "disponible" calculado quedaba muy negativo, bloqueando SIEMPRE aunque
+							// hubiera cupo real (QtyReserved) libre. Ahora se usa QtyReserved (cupo
+							// libre real por invariante) menos solo lo PENDIENTE (DR/IP, aun no
+							// reflejado en QtyUsed) de otras lineas -- CO/CL/VO no se vuelven a restar.
+							BigDecimal qtyPendienteOtras = DB.getSQLValueBD(po.get_TrxName(), "SELECT COALESCE(SUM(QtyOrdered),0) FROM C_OrderLine col " +
 									" INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID) " +
-									" WHERE co.DocStatus NOT IN ('VO') AND C_OrderLine_ID <> " +oLine.get_ID()+								
+									" WHERE co.DocStatus IN ('DR','IP') AND C_OrderLine_ID <> " +oLine.get_ID()+
 									" AND M_RequisitionLine_ID = "+rLine.get_ID());
-							if(qtyUsed == null)
-								qtyUsed = Env.ZERO;
-							BigDecimal qtyAvarLine =  rLine.getQty().subtract(qtyUsed);							
+							if(qtyPendienteOtras == null)
+								qtyPendienteOtras = Env.ZERO;
+							// QtyReserved es columna custom, sin getter generado en MRequisitionLine
+							Object qtyResObj = rLine.get_Value("QtyReserved");
+							BigDecimal qtyReservedLine = (qtyResObj instanceof BigDecimal) ? (BigDecimal) qtyResObj : Env.ZERO;
+							BigDecimal qtyAvarLine = qtyReservedLine.subtract(qtyPendienteOtras);
 							if(qtyAvarLine.compareTo(oLine.getQtyOrdered())<0)
 								return "Error: Cantidad Supera Cantidad de Solicitud. <LC: 119>";
 							//se valida que sea de la misma direccion y cliente
@@ -285,7 +363,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 													" and mrl2.M_Product_ID = "+oLine.getM_Product_ID()+"" +
 													//ininoles se agrega que solo use la misma bodega
 													" and mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
-													" AND (mrl2.qty - mrl2.qtyUsed) > 0");
+													" AND "+sqlCupoLibre("mrl2")+" > 0");
 											if (ID_reqP > 0)
 											{
 												MRequisition req = new MRequisition(po.getCtx(), ID_reqP, po.get_TrxName());
@@ -295,7 +373,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 														" WHERE mr.DocStatus IN ('CO','CL') AND mr2.C_BPartner_ID = "+order.getC_BPartner_ID()+
 														" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+"" +
 														" AND qty > qtyUsed AND mr.C_DocType_ID IN (1000111,1000570)");*/								
-												BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+												BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 														" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqP+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 												return "ERROR: Debe usar solicitud Ecommerce abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol + ". <LC: 193>";
 											}
@@ -307,28 +385,54 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 												" AND mr.C_BPartner_Location_ID = "+order.getC_BPartner_Location_ID()+
 												//ininoles se agrega que solo use la misma bodega
 												" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
-												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 										//se revisa si existe solicitud de distribucion abierta
 										int ID_reqD = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
 												" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
 												" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
 												" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
 												" AND mr.OverWriteRequisition = 'Y' AND mr.C_DocType_ID NOT IN (1000111,1000570)"+
-												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 										
 										if(ID_req > 0)
 										{
 											MRequisition req = new MRequisition(po.getCtx(), ID_req, po.get_TrxName());
-											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 													" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_req+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());								
 											return "ERROR: Debe usar solicitud abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+"con cantidad "+qtySol+". <LC: 217>";
 										}
 										else if (ID_reqD > 0)
 										{
 											MRequisition req = new MRequisition(po.getCtx(), ID_reqD, po.get_TrxName());
-											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 													" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqD+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 											return "ERROR: Debe usar solicitud de distribuci�n abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol+ ". <LC: 224>";
+										}
+										// FIX 2026-09-08 (FG): la reserva fisica del cliente puede estar integramente
+										// tomada por lineas de ESTA MISMA nota que aun no completan (QtyUsed recien se
+										// actualiza en AFTER_COMPLETE). sqlCupoLibre() ya evita el bloqueo falso, pero
+										// no se puede caer al calculo legacy de disponible de mas abajo: ese calculo
+										// suma de vuelta la reserva propia del cliente e ignora las reservas fisicas
+										// de otros clientes, con lo que se podria vender sobre reserva ajena.
+										// Se valida contra qtyavailableopenvianum (fuente de verdad del disponible).
+										if(ID_req <= 0 && ID_reqD <= 0)
+										{
+											int ID_reqTom = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
+													" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
+													" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
+													" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
+													" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND rl.Qty > rl.QtyUsed");
+											if(ID_reqTom > 0)
+											{
+												BigDecimal dispReal = DB.getSQLValueBD(po.get_TrxName(),
+														"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+												if(dispReal == null) dispReal = Env.ZERO;
+												if(dispReal.compareTo(oLine.getQtyOrdered()) < 0)
+													return "ERROR: Reserva fisica ya tomada en esta nota. Disponible de bodega ("+dispReal.intValue()
+															+") no cubre "+oLine.getQtyOrdered().intValue()+" para "+oLine.getM_Product().getValue()
+															+" - "+oLine.getM_Product().getName()+". <LC: RF-AGOTADA>";
+												return null;
+											}
 										}
 								//ininoles 24-09-2019 se mueven validaciones  de solicitud y presolicitud de venta al principio
 								
@@ -768,7 +872,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 													" and mrl2.M_Product_ID = "+oLine.getM_Product_ID()+"" +
 													//ininoles se agrega que solo use la misma bodega
 													" and mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
-													" AND (mrl2.qty - mrl2.qtyUsed) > 0");
+													" AND "+sqlCupoLibre("mrl2")+" > 0");
 											if (ID_reqP > 0)
 											{
 												MRequisition req = new MRequisition(po.getCtx(), ID_reqP, po.get_TrxName());
@@ -778,7 +882,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 														" WHERE mr.DocStatus IN ('CO','CL') AND mr2.C_BPartner_ID = "+order.getC_BPartner_ID()+
 														" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+"" +
 														" AND qty > qtyUsed AND mr.C_DocType_ID IN (1000111,1000570)");*/								
-												BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+												BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 														" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqP+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 												return "ERROR: Debe usar solicitud Ecommerce abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol + ". <LC: 193>";
 											}
@@ -790,28 +894,54 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 												" AND mr.C_BPartner_Location_ID = "+order.getC_BPartner_Location_ID()+
 												//ininoles se agrega que solo use la misma bodega
 												" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
-												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 										//se revisa si existe solicitud de distribucion abierta
 										int ID_reqD = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
 												" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
 												" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
 												" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
 												" AND mr.OverWriteRequisition = 'Y' AND mr.C_DocType_ID NOT IN (1000111,1000570)"+
-												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 										
 										if(ID_req > 0)
 										{
 											MRequisition req = new MRequisition(po.getCtx(), ID_req, po.get_TrxName());
-											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 													" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_req+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());								
 											return "ERROR: Debe usar solicitud abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+"con cantidad "+qtySol+". <LC: 217>";
 										}
 										else if (ID_reqD > 0)
 										{
 											MRequisition req = new MRequisition(po.getCtx(), ID_reqD, po.get_TrxName());
-											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+											BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 													" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqD+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 											return "ERROR: Debe usar solicitud de distribuci�n abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol+ ". <LC: 224>";
+										}
+										// FIX 2026-09-08 (FG): la reserva fisica del cliente puede estar integramente
+										// tomada por lineas de ESTA MISMA nota que aun no completan (QtyUsed recien se
+										// actualiza en AFTER_COMPLETE). sqlCupoLibre() ya evita el bloqueo falso, pero
+										// no se puede caer al calculo legacy de disponible de mas abajo: ese calculo
+										// suma de vuelta la reserva propia del cliente e ignora las reservas fisicas
+										// de otros clientes, con lo que se podria vender sobre reserva ajena.
+										// Se valida contra qtyavailableopenvianum (fuente de verdad del disponible).
+										if(ID_req <= 0 && ID_reqD <= 0)
+										{
+											int ID_reqTom = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
+													" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
+													" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
+													" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
+													" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND rl.Qty > rl.QtyUsed");
+											if(ID_reqTom > 0)
+											{
+												BigDecimal dispReal = DB.getSQLValueBD(po.get_TrxName(),
+														"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+												if(dispReal == null) dispReal = Env.ZERO;
+												if(dispReal.compareTo(oLine.getQtyOrdered()) < 0)
+													return "ERROR: Reserva fisica ya tomada en esta nota. Disponible de bodega ("+dispReal.intValue()
+															+") no cubre "+oLine.getQtyOrdered().intValue()+" para "+oLine.getM_Product().getValue()
+															+" - "+oLine.getM_Product().getName()+". <LC: RF-AGOTADA>";
+												return null;
+											}
 										}
 								//ininoles 24-09-2019 se mueven validaciones  de solicitud y presolicitud de venta al principio
 								
@@ -1202,6 +1332,33 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 	}	//	modelChange
 	
 	
+	/**
+	 * FIX 2026-09-08 (FG): cupo REAL libre de una linea de solicitud (reserva fisica).
+	 *
+	 * Antes las busquedas de "solicitud abierta" usaban Qty > QtyUsed. QtyUsed solo
+	 * se actualiza al COMPLETAR la OV (ModWindsorUpdateReserved, AFTER_COMPLETE), asi
+	 * que mientras la OV esta en DR/IP el cupo ya esta tomado por sus lineas pero
+	 * QtyUsed sigue en 0. Resultado: al agregar una segunda linea del mismo producto
+	 * para completar con disponible de bodega, el validador encontraba cupo inexistente
+	 * y devolvia "Debe usar solicitud abierta para este cliente" aunque la reserva ya
+	 * estuviera integramente tomada en la linea anterior de la MISMA nota.
+	 *
+	 * Caso: nota 31585495, producto 828420 (reserva 905988 Qty=45, QtyUsed=0,
+	 * ya tomada completa por la linea 70) + 10 disponibles en Lampa.
+	 *
+	 * Cupo libre = Qty - QtyUsed - (QtyOrdered de lineas OV en DR/IP ligadas a la reqline)
+	 *
+	 * @param alias alias de M_RequisitionLine dentro del query
+	 * @return expresion SQL con el cupo libre real
+	 */
+	private static String sqlCupoLibre(String alias)
+	{
+		return "("+alias+".Qty - "+alias+".QtyUsed - NVL((SELECT SUM(colcl.QtyOrdered)"
+				+" FROM C_OrderLine colcl INNER JOIN C_Order cocl ON (cocl.C_Order_ID = colcl.C_Order_ID)"
+				+" WHERE colcl.M_RequisitionLine_ID = "+alias+".M_RequisitionLine_ID"
+				+" AND cocl.DocStatus IN ('DR','IP')), 0))";
+	}
+
 	public static String rtrim(String s, char c) {
 	    int i = s.length()-1;
 	    while (i >= 0 && s.charAt(i) == c)
@@ -1227,8 +1384,15 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 		if(timing == TIMING_BEFORE_PREPARE && po.get_Table_ID()== MOrder.Table_ID)  
 		{
 			MOrder order = (MOrder) po;
-			if(order.isSOTrx() && order.getAD_Client_ID() == 1000000 && order.getC_DocTypeTarget_ID() == 1000030
-					&& ((order.getDocStatus().compareTo("CO") != 0 && order.getDocStatus().compareTo("IP") != 0
+			// FIX 2026-07-30 (FG): incluye doctype 1000568 (Orden de Venta-Boleta), ver
+			// mismo FIX en modelChange() mas arriba.
+			// FIX 2026-08-03 (FG): idem fix de modelChange() - se saca la exclusion de
+			// DocStatus='IP'. Al reactivar y volver a completar, TIMING_BEFORE_PREPARE corre
+			// con DocStatus='IP' en memoria; con la exclusion anterior, re-completar desde IP
+			// sin marcar ReValidar se saltaba todo este chequeo.
+			if(order.isSOTrx() && order.getAD_Client_ID() == 1000000
+					&& (order.getC_DocTypeTarget_ID() == 1000030 || order.getC_DocTypeTarget_ID() == 1000568)
+					&& ((order.getDocStatus().compareTo("CO") != 0
 					&& order.getDocStatus().compareTo("IN") != 0)|| order.get_ValueAsBoolean("ReValidar")))
 			{
 				MOrderLine[] oLines = order.getLines(false, null);
@@ -1243,7 +1407,43 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 							;
 						else
 						{
-							
+							// FIX 2026-08-03 (FG): mismo chequeo MarketPlace que en modelChange() mas
+							// arriba. Se repite aca porque las lineas de estas ordenes suelen insertarse
+							// por SQL directo (import masivo), sin pasar por modelChange, por lo que
+							// este es el unico punto de control antes de completar.
+							// FIX 2026-08-04 (FG): idem fix de modelChange() - si la linea ya tiene
+							// reqline propia (M_RequisitionLine_ID>0), no forzar contra el pool 901541.
+							if("Marketplace".equals(order.get_ValueAsString("FormaCompra"))
+									&& oLine.get_ValueAsInt("M_RequisitionLine_ID") <= 0)
+							{
+								BigDecimal roomReserva = DB.getSQLValueBD(po.get_TrxName(),
+										"SELECT NVL(rl.Qty - rl.QtyUsed,0) - NVL((" +
+										"  SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
+										"  JOIN C_Order o2 ON o2.C_Order_ID = co.C_Order_ID" +
+										"  WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
+										"    AND o2.DocStatus NOT IN ('VO')" +
+										"    AND co.C_OrderLine_ID <> "+oLine.get_ID() +
+										"), 0)" +
+										" FROM M_RequisitionLine rl" +
+										" JOIN M_Requisition r ON r.M_Requisition_ID = rl.M_Requisition_ID" +
+										" WHERE r.DocumentNo = '901541' AND rl.M_Product_ID = "+oLine.getM_Product_ID());
+								if(roomReserva == null) roomReserva = Env.ZERO;
+
+								if(roomReserva.compareTo(oLine.getQtyOrdered()) >= 0)
+									continue;
+
+								BigDecimal dispBodega = DB.getSQLValueBD(po.get_TrxName(),
+										"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+								if(dispBodega == null) dispBodega = Env.ZERO;
+
+								if(dispBodega.compareTo(oLine.getQtyOrdered()) < 0)
+									return "ERROR: Stock Insuficiente. Reserva Ecommerce 901541 ("+roomReserva.intValue()
+											+") y Disponible de bodega ("+dispBodega.intValue()+") no cubren la cantidad para "
+											+oLine.getM_Product().getValue()+" - "+oLine.getM_Product().getName()+". <LC: MKTPLACE>";
+
+								continue;
+							}
+
 							//validaciones nuevas
 							//ininoles 27-06 nueva logica pedida por fernando
 							if(oLine.get_ValueAsInt("M_RequisitionLine_ID")>0)
@@ -1406,7 +1606,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 											//ininoles se agrega que solo use la misma bodega
 											" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
 											" and mrl2.M_Product_ID = "+oLine.getM_Product_ID()+
-											" AND (mrl2.qty - mrl2.qtyUsed) > 0");
+											" AND "+sqlCupoLibre("mrl2")+" > 0");
 									if (ID_reqP > 0)
 									{
 										MRequisition req = new MRequisition(po.getCtx(), ID_reqP, po.get_TrxName());
@@ -1416,7 +1616,7 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 												" WHERE mr.DocStatus IN ('CO','CL') AND mr2.C_BPartner_ID = "+order.getC_BPartner_ID()+
 												" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+"" +
 												" AND qty > qtyUsed AND mr.C_DocType_ID IN (1000111,1000570)");*/								
-										BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+										BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 												" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqP+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 										return "ERROR: Debe usar solicitud Ecommerce abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol + " Linea OV:"+oLine.getLine() +". <LC: 494>";
 									}
@@ -1429,28 +1629,54 @@ public class ModWindsorValidAvaiQtyOrder implements ModelValidator
 										" AND mr.C_BPartner_Location_ID = "+order.getC_BPartner_Location_ID()+
 										//ininoles se agrega que solo use la misma bodega
 										" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
-										" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+										" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 								//se revisa si existe solicitud de distribucion abierta
 								int ID_reqD = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
 										" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
 										" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
 										" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
 										" AND mr.OverWriteRequisition = 'Y' AND mr.C_DocType_ID NOT IN (1000111,1000570)"+
-										" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND qty > qtyUsed");
+										" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND "+sqlCupoLibre("rl")+" > 0");
 								
 								if(ID_req > 0)
 								{
 									MRequisition req = new MRequisition(po.getCtx(), ID_req, po.get_TrxName());
-									BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+									BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 											" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_req+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());								
 									return "ERROR: Debe usar solicitud abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+"con cantidad "+qtySol+ ". Liena OV:"+oLine.getLine()+". <LC: 519>";
 								}
 								else if (ID_reqD > 0)
 								{
 									MRequisition req = new MRequisition(po.getCtx(), ID_reqD, po.get_TrxName());
-									BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM(qty - qtyUsed) FROM M_RequisitionLine rl " +
+									BigDecimal qtySol = DB.getSQLValueBD(po.get_TrxName(), "SELECT SUM("+sqlCupoLibre("rl")+") FROM M_RequisitionLine rl " +
 											" WHERE rl.IsActive = 'Y' AND rl.M_Requisition_ID = "+ID_reqD+" AND rl.M_Product_ID = "+oLine.getM_Product_ID());
 									return "ERROR: Debe usar solicitud de distribuci�n abierta para este cliente. N�: "+req.getDocumentNo()+", producto "+oLine.getM_Product().getName()+" con cantidad "+qtySol;
+								}
+								// FIX 2026-09-08 (FG): la reserva fisica del cliente puede estar integramente
+								// tomada por lineas de ESTA MISMA nota que aun no completan (QtyUsed recien se
+								// actualiza en AFTER_COMPLETE). sqlCupoLibre() ya evita el bloqueo falso, pero
+								// no se puede caer al calculo legacy de disponible de mas abajo: ese calculo
+								// suma de vuelta la reserva propia del cliente e ignora las reservas fisicas
+								// de otros clientes, con lo que se podria vender sobre reserva ajena.
+								// Se valida contra qtyavailableopenvianum (fuente de verdad del disponible).
+								if(ID_req <= 0 && ID_reqD <= 0)
+								{
+									int ID_reqTom = DB.getSQLValue(po.get_TrxName(), "SELECT MAX(mr.M_Requisition_ID) FROM M_RequisitionLine rl " +
+											" INNER JOIN M_Requisition mr ON (rl.M_Requisition_ID = mr.M_Requisition_ID) " +
+											" WHERE mr.DocStatus IN ('CO','CL') AND mr.C_BPartner_ID = "+order.getC_BPartner_ID()+
+											" AND mr.M_Warehouse_ID = "+order.getM_Warehouse_ID()+
+											" AND rl.M_Product_ID = "+oLine.getM_Product_ID()+" AND rl.Qty > rl.QtyUsed");
+									if(ID_reqTom > 0)
+									{
+										BigDecimal dispReal = DB.getSQLValueBD(po.get_TrxName(),
+												"SELECT qtyavailableopenvianum("+oLine.getM_Product_ID()+") FROM dual");
+										if(dispReal == null) dispReal = Env.ZERO;
+										if(dispReal.compareTo(oLine.getQtyOrdered()) < 0)
+											return "ERROR: Reserva fisica ya tomada en esta nota. Disponible de bodega ("+dispReal.intValue()
+													+") no cubre "+oLine.getQtyOrdered().intValue()+" para "+oLine.getM_Product().getValue()
+													+" - "+oLine.getM_Product().getName()+". <LC: RF-AGOTADA>";
+										continue;
+									}
 								}
 								
 								//ininoles 24-09-2019 se mueven validaciones  de solicitud y presolicitud de venta al principio

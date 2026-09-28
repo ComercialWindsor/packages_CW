@@ -99,12 +99,22 @@ public class ModWindsorUpdateReservedSales implements ModelValidator
 									sLine.getC_OrderLine_ID(),
 									po.get_TrxName());
 
+							// FIX 2026-09-08 (FG): el despacho que se esta completando AUN NO tiene
+							// DocStatus='CO' en la BD cuando corre TIMING_AFTER_COMPLETE (Adempiere
+							// graba el DocStatus recien al volver de completeIt()). Con el filtro
+							// original quedaba fuera de la suma, asi que qtyDesp no incluia lo que
+							// se acababa de despachar y la linea quedaba con
+							// QtyReserved = QtyOrdered - despachos_anteriores = cantidad de ESTE
+							// despacho. Esa "reserva fantasma" (QtyDelivered >= QtyOrdered pero
+							// QtyReserved > 0) la sigue restando qtyavailableofb /
+							// qtyavailableopenvianum sobre stock que ya salio -> disponibles
+							// negativos. Se incluye explicitamente el M_InOut en curso.
 							BigDecimal qtyDesp = DB.getSQLValueBD(po.get_TrxName(),
 									"SELECT SUM(movementQty)" +
 									" FROM M_InOutLine iol" +
 									" INNER JOIN M_InOut io ON (iol.M_InOut_ID = io.M_InOut_ID)" +
-									" WHERE DocStatus IN ('CO','CL')" +
-									" AND C_OrderLine_ID = ?",
+									" WHERE (io.DocStatus IN ('CO','CL') OR io.M_InOut_ID = " + ship.get_ID() + ")" +
+									" AND iol.C_OrderLine_ID = ?",
 									oLine.get_ID());
 							if (qtyDesp == null)
 								qtyDesp = Env.ZERO;

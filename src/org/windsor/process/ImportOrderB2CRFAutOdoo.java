@@ -618,6 +618,25 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 								pasarAOV = "N";
 								sob = new BigDecimal(resultadoDisp[4]);
 								ErrorMsg = "No hay stock en la bodega actual, verificar en otras bodegas";
+								// FIX 2026-07-07 (FG): si ya se insertaron líneas parciales, agregar
+								// línea noStock por el resto no cubierto (qty=0, demand=cantRestante, NotPrint)
+								int cantResto = resultadoDisp[2];
+								if (isInsertLine && cantResto > 0) {
+									lineas++;
+									int oblNoStock = Integer.parseInt(DB.getSQLValueString(null,
+										"Select NEXTIDFUNC(1005417,'N') from c_charge where c_charge_ID=1000010"));
+									BigDecimal netoNS = new BigDecimal(cantResto * Precio);
+									String insertNoStock = "INSERT INTO C_ORDERB2CLINEAUT_ODOO "
+										+ "(C_ORDERB2CLINEAUT_ODOO_ID,C_ORDERB2CAUT_Odoo_ID,AD_Client_ID,AD_Org_ID,"
+										+ "CreatedBy,UpdatedBy,Line,QtyEntered,LineNetAmt,ProductValue,"
+										+ "NOMBREGENERICO,M_Product_ID,PASARAOV,PriceEntered,CODIGOGENERICO,Demand,StockBodegas,ErrorMsg) "
+										+ "VALUES (" + oblNoStock + "," + b2c_id + "," + m_AD_Client_ID + "," + m_AD_Org_ID
+										+ "," + CreatedBy + "," + CreatedBy + "," + (lineas * 10) + ",0," + netoNS
+										+ ",'" + ProductValue + "','" + DOCTYPENAME + "'," + M_Product_ID + ",'N',"
+										+ Precio + ",'" + Generico + "'," + cantResto + "," + sob + ",'" + ErrorMsg + "')";
+									ejecutarSQL(insertNoStock);
+									isInsertLine = true;
+								}
 							}
 							if (resultadoDisp[5] == 1) {
 								pasarAOV = "Y"; // no almacenable
@@ -724,23 +743,21 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 					if (rsreq.next()) {
 						int qtyRes = rsreq.getInt("qtyreserved");
 						int reqLineId = rsreq.getInt("m_requisitionline_ID");
-						if (Cantidad <= qtyRes) {
-							BigDecimal neto = new BigDecimal(Cantidad * Precio);
-							insertB2CLine(obl_id, b2c_id, lineas, new BigDecimal(Cantidad), neto,
-								ProductValue, DOCTYPENAME, M_Product_ID, Precio, Generico,
-								CreatedBy, "Y", reqLineId);
-							inserted = 1;
-							cantResult = 0;
-							salto = 1;
+						// FIX 2026-07-07 (FG): lock RL y cap a dispReal para evitar race condition
+						BigDecimal dispReal = getDisponibleRealConLock(reqLineId);
+						int qtyEfectivo = dispReal.min(new BigDecimal(qtyRes)).intValue();
+						if (qtyEfectivo <= 0) {
+							log.warning("ReservaEcom RL=" + reqLineId + " dispReal=" + dispReal + " <=0, skip");
 						} else {
-							BigDecimal aux = new BigDecimal(qtyRes);
-							BigDecimal neto = new BigDecimal(qtyRes * Precio);
+							int qtyUsar = Math.min(cant.intValue(), qtyEfectivo);
+							BigDecimal aux = new BigDecimal(qtyUsar);
+							BigDecimal neto = new BigDecimal(qtyUsar * Precio);
 							insertB2CLine(obl_id, b2c_id, lineas, aux, neto,
 								ProductValue, DOCTYPENAME, M_Product_ID, Precio, Generico,
 								CreatedBy, "Y", reqLineId);
 							inserted = 1;
-							cantResult = cant.intValue() - qtyRes;
-							salto = 2;
+							cantResult = cant.intValue() - qtyUsar;
+							salto = (cantResult <= 0) ? 1 : 2;
 						}
 					}
 				} finally {
@@ -809,23 +826,21 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 					if (rsrn.next()) {
 						int qtyRes = rsrn.getInt("qtyreserved");
 						int reqLineId = rsrn.getInt("m_requisitionline_ID");
-						if (Cantidad <= qtyRes) {
-							BigDecimal neto = new BigDecimal(cant.intValue() * Precio);
-							insertB2CLine(obl_id, b2c_id, lineas, cant, neto,
-								ProductValue, DOCTYPENAME, M_Product_ID, Precio, Generico,
-								CreatedBy, "Y", reqLineId);
-							inserted = 1;
-							cantResult = 0;
-							salto = 3;
+						// FIX 2026-07-07 (FG): lock RL y cap a dispReal para evitar race condition
+						BigDecimal dispReal = getDisponibleRealConLock(reqLineId);
+						int qtyEfectivo = dispReal.min(new BigDecimal(qtyRes)).intValue();
+						if (qtyEfectivo <= 0) {
+							log.warning("ReservaFisica RL=" + reqLineId + " dispReal=" + dispReal + " <=0, skip");
 						} else {
-							BigDecimal aux = new BigDecimal(qtyRes);
-							BigDecimal neto = new BigDecimal(qtyRes * Precio);
+							int qtyUsar = Math.min(cant.intValue(), qtyEfectivo);
+							BigDecimal aux = new BigDecimal(qtyUsar);
+							BigDecimal neto = new BigDecimal(qtyUsar * Precio);
 							insertB2CLine(obl_id, b2c_id, lineas, aux, neto,
 								ProductValue, DOCTYPENAME, M_Product_ID, Precio, Generico,
 								CreatedBy, "Y", reqLineId);
 							inserted = 1;
-							cantResult = cant.intValue() - qtyRes;
-							salto = 4;
+							cantResult = cant.intValue() - qtyUsar;
+							salto = (cantResult <= 0) ? 3 : 4;
 						}
 					}
 				} finally {
@@ -913,7 +928,9 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 			rsps = pstmtps.executeQuery();
 			if (rsps.next()) {
 				if (rsps.getString("ProductType").equals("I")) {
-					if (cant.intValue() <= rsps.getInt("Disponible")) {
+					int dispBodega = rsps.getInt("Disponible");
+					if (dispBodega >= cant.intValue()) {
+						// Stock cubre todo el pendiente
 						BigDecimal neto = new BigDecimal(cant.intValue() * Precio);
 						String insertLine = "INSERT INTO C_ORDERB2CLINEAUT_ODOO "
 							+ "(C_ORDERB2CLINEAUT_ODOO_ID,C_ORDERB2CAUT_Odoo_ID,AD_Client_ID,AD_Org_ID,"
@@ -925,7 +942,28 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 							+ Precio + ",'" + Generico + "')";
 						ejecutarSQL(insertLine);
 						inserted = 1;
+						cantResult = 0;
 						salto = 5;
+					} else if (dispBodega > 0) {
+						// FIX 2026-07-07 (FG): stock parcial — insertar lo disponible, retornar resto para noStock
+						BigDecimal parcial = new BigDecimal(dispBodega);
+						BigDecimal neto = new BigDecimal(dispBodega * Precio);
+						String insertLine = "INSERT INTO C_ORDERB2CLINEAUT_ODOO "
+							+ "(C_ORDERB2CLINEAUT_ODOO_ID,C_ORDERB2CAUT_Odoo_ID,AD_Client_ID,AD_Org_ID,"
+							+ "CreatedBy,UpdatedBy,Line,QtyEntered,LineNetAmt,ProductValue,"
+							+ "NOMBREGENERICO,M_Product_ID,PASARAOV,PriceEntered,CODIGOGENERICO) "
+							+ "VALUES (" + obl_id + "," + b2c_id + "," + m_AD_Client_ID + "," + m_AD_Org_ID
+							+ "," + CreatedBy + "," + CreatedBy + "," + (lineas * 10) + "," + parcial + "," + neto
+							+ ",'" + ProductValue + "','" + DOCTYPENAME + "'," + M_Product_ID + ",'Y',"
+							+ Precio + ",'" + Generico + "')";
+						ejecutarSQL(insertLine);
+						inserted = 1;
+						cantResult = cant.intValue() - dispBodega;
+						sinStock = 1;
+						otroDisponible = rsps.getInt("OtroDisponible");
+						salto = 6;
+						mensajeCorreo.append("Pedido " + documentNo + " Producto " + ProductValue
+							+ " Stock parcial: " + dispBodega + " de " + cant.intValue() + " solicitados<br />");
 					} else {
 						sinStock = 1;
 						otroDisponible = rsps.getInt("OtroDisponible");
@@ -1329,28 +1367,53 @@ public class ImportOrderB2CRFAutOdoo extends SvrProcess {
 	// con FOR UPDATE lock. Mantiene lock hasta commit/rollback de la trx actual.
 	//
 	// FIX 2026-06-11 (FG): LEAST de dos checks:
-	//   1) Qty - SUM(OVs CO/IP/DR): espacio no comprometido en la linea
+	//   1) Qty - SUM(OVs CO/IP/DR) - SUM(QtyDelivered CL): espacio no comprometido
 	//   2) GREATEST(0, qtyavailableopenvianum + QtyReserved): backing fisico real
 	//      (qtyavailableopenvianum ya descontó QtyReserved; sumarlo devuelve el
 	//       stock fisico que respalda ESTA reserva. Si es 0, la reserva esta obsoleta.)
 	// El LEAST previene consumir mas de lo que el stock fisico puede respaldar.
+	//
+	// FIX 2026-07-07 (FG): check1 ahora RESTA SUM(QtyDelivered de OVs CL). Antes solo
+	// contaba QtyOrdered de CO/IP/DR e IGNORABA lo ya entregado en OVs cerradas (CL).
+	// Pero ModWindsorUpdateReserved computa QtyUsed=SUM(QtyDelivered CO/CL/IP), asi que
+	// al completar la OV el recalculo daba QtyUsed+QtyReserved > Qty -> DISPONIBLE<0.
+	// Restar el entregado-CL alinea el pre-check con el recalculo y evita el negativo.
 	private BigDecimal getDisponibleRealConLock(int reqLineId) {
 		PreparedStatement ps = null;
 		ResultSet rs = null;
 		try {
+			// FIX 2026-07-08 (FG): qtyavailableopenvianum es costosa (10 sub-queries para BOM).
+			// Llamarla DENTRO del FOR UPDATE mantiene el lock durante toda su ejecucion (20-95ms),
+			// serializando todos los imports que comparten la misma reqLine.
+			// Fix: pre-calcular el cap de bodega SIN lock, luego usar el valor literal en el FOR UPDATE.
+			BigDecimal dispBodega = DB.getSQLValueBD(get_TrxName(),
+				"SELECT NVL(qtyavailableopenvianum(M_Product_ID),0)" +
+				" FROM M_RequisitionLine WHERE M_RequisitionLine_ID=" + reqLineId,
+				new Object[0]);
+			if (dispBodega == null) dispBodega = BigDecimal.ZERO;
+			// FIX 2026-07-30 (FG): NO clampear dispBodega negativo a 0 aqui. El GREATEST(0, ...)
+			// de mas abajo ya es el piso correcto DESPUES de sumar rl.QtyReserved. Clampear antes
+			// perdia la senal de negativo: con dispBodega=-7 y QtyReserved=3, el resultado correcto
+			// es GREATEST(0,-7+3)=0 (reserva sin respaldo fisico, bloquea consumo); clampeando a 0
+			// primero daba GREATEST(0,0+3)=3, dejando usar la reserva pese al disponible negativo.
+
 			String sql = "SELECT LEAST(" +
 				" rl.Qty - NVL((" +
 				"   SELECT SUM(co.QtyOrdered) FROM C_OrderLine co" +
 				"   JOIN C_Order o ON o.C_Order_ID = co.C_Order_ID" +
 				"   WHERE co.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
 				"     AND o.DocStatus IN ('CO','IP','DR')" +
+				" ), 0) - NVL((" +
+				"   SELECT SUM(co2.QtyDelivered) FROM C_OrderLine co2" +
+				"   JOIN C_Order o2 ON o2.C_Order_ID = co2.C_Order_ID" +
+				"   WHERE co2.M_RequisitionLine_ID = rl.M_RequisitionLine_ID" +
+				"     AND o2.DocStatus = 'CL'" +
 				" ), 0)," +
-				" GREATEST(0, NVL(qtyavailableopenvianum(rl.M_Product_ID), 0) + rl.QtyReserved)" +
+				" GREATEST(0, " + dispBodega.toPlainString() + " + rl.QtyReserved)" +
 				") AS disponible" +
 				" FROM M_RequisitionLine rl" +
-				" WHERE rl.M_RequisitionLine_ID = ? FOR UPDATE";
+				" WHERE rl.M_RequisitionLine_ID = " + reqLineId + " FOR UPDATE";
 			ps = DB.prepareStatement(sql, get_TrxName());
-			ps.setInt(1, reqLineId);
 			rs = ps.executeQuery();
 			if (rs.next()) {
 				BigDecimal d = rs.getBigDecimal("disponible");

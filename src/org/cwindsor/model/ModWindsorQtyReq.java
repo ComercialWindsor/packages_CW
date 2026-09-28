@@ -86,12 +86,15 @@ public class ModWindsorQtyReq implements ModelValidator
 	{
 		log.info(po.get_TableName() + " Type: "+type);
 		
-		if(type == TYPE_BEFORE_NEW && po.get_Table_ID()== MOrderLine.Table_ID)  
+		if(type == TYPE_BEFORE_NEW && po.get_Table_ID()== MOrderLine.Table_ID)
 		{
 			MOrderLine oLine = (MOrderLine) po;
 			if(oLine.getParent().isSOTrx())
 			{
-				if(oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
+				// FIX 2026-08-03 (FG): saltar validacion para productos no-stock/servicio (ej: Transporte)
+				if(oLine.getM_Product_ID() > 0 && oLine.getM_Product().isStocked()
+						&& oLine.getM_Product().getProductType().compareTo("I") == 0
+						&& oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
 				{
 					MRequisitionLine rline = new MRequisitionLine(po.getCtx(), oLine.get_ValueAsInt("M_RequisitionLine_ID"), po.get_TrxName());
 					BigDecimal qtyUsed = (BigDecimal)rline.get_Value("QtyUsed");
@@ -112,10 +115,21 @@ public class ModWindsorQtyReq implements ModelValidator
 			// Si solo cambia QtyReserved (ej: completar despacho), no revalidar.
 			if(!oLine.is_ValueChanged("QtyOrdered"))
 				return null;
+			// FIX 2026-09-28 (FG): bajar la cantidad nunca consume mas reserva, no validar.
+			// Caso reqline 1097686 / OV 31586830: Qty=101 vs SUM(QtyOrdered) otras CO=102
+			// (lineas CO cerradas parcialmente) daba negativo aun con cantidad nueva 0 y
+			// bloqueaba dejar la linea en 0.
+			Object oldQtyObj = oLine.get_ValueOld("QtyOrdered");
+			if(oldQtyObj instanceof BigDecimal
+					&& oLine.getQtyOrdered().compareTo((BigDecimal) oldQtyObj) <= 0)
+				return null;
 			MOrder oHead = new MOrder (po.getCtx(), oLine.getC_Order_ID(),po.get_TrxName() );
 			if(oLine.getParent().isSOTrx())
 			{
-				if(oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
+				// FIX 2026-08-03 (FG): saltar validacion para productos no-stock/servicio (ej: Transporte)
+				if(oLine.getM_Product_ID() > 0 && oLine.getM_Product().isStocked()
+						&& oLine.getM_Product().getProductType().compareTo("I") == 0
+						&& oLine.get_ValueAsInt("M_RequisitionLine_ID") > 0)
 				{
 					MRequisitionLine rline = new MRequisitionLine(po.getCtx(), oLine.get_ValueAsInt("M_RequisitionLine_ID"), po.get_TrxName());
 					BigDecimal qtyUse = DB.getSQLValueBD(po.get_TrxName(), "SELECT COALESCE(SUM(QtyOrdered),0) FROM C_OrderLine col" +

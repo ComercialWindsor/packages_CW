@@ -31,9 +31,9 @@ import org.compiere.util.Trx;
  * Importa pedidos desde ov_ordenesmuro@ERPMuro I_OrderB2C y genera Orden de
  * Venta (C_Order), procesando SOLO el C_Order_ID indicado.
  *
- * Cambios clave: - Parámetro C_Order_ID (TableDirect C_Order) - Precarga por
+ * Cambios clave: - Parï¿½metro C_Order_ID (TableDirect C_Order) - Precarga por
  * dblink ov_ordenesmuro@ERPMuro (Java 1.6) - Mantiene I_OrderB2C /
- * I_OrderB2CLine - Bloques try/catch/finally clásicos (sin try-with-resources)
+ * I_OrderB2CLine - Bloques try/catch/finally clï¿½sicos (sin try-with-resources)
  */
 public class ProcesarOrdenMuroMashini extends SvrProcess {
 
@@ -41,7 +41,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 	private int m_AD_Client_ID = 1000000;
 	private int m_AD_Org_ID = 1000000;
 
-	/** Parámetro: procesar solo un documento */
+	/** Parï¿½metro: procesar solo un documento */
 	private int p_C_Order_ID = 0;
 
 	private StringBuffer sql = null;
@@ -320,7 +320,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 							}
 							BigDecimal cant = new BigDecimal (Cantidad);
 
-							// Validación producto
+							// Validaciï¿½n producto
 							String sqlp = "Select count(*) as cuenta from m_product where m_product_ID="+M_Product_ID;
 							PreparedStatement pstmtp = null; ResultSet rsp = null;
 							try {
@@ -400,7 +400,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 											try { if (pstmtre != null) pstmtre.close(); } catch (Exception ignore) {}
 										}
 
-										// Reserva física
+										// Reserva fï¿½sica
 										if(salto==0 || salto==2) {
 											String sqlrfn=" select count(1) encontrado "+
 													" from m_requisition r  "+
@@ -601,7 +601,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 						lineas++;
 					} // while rsRecorre
 
-					// === Crear OV si no hay errores controlados y hay líneas OK ===
+					// === Crear OV si no hay errores controlados y hay lï¿½neas OK ===
 					if (errorp + errorbp +  errorbpl +  erroruser + errorst==0) {
 						MOrder order = null;
 						int orderId = 0;
@@ -609,7 +609,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 						int contadordoc = 0;
 						int documentNo = 1;
 
-						// validar que existan líneas en C_OrderB2CLine
+						// validar que existan lï¿½neas en C_OrderB2CLine
 						String sqlvl = "Select count(*) cuenta from C_OrderB2CLine where C_OrderB2C_ID="+
 								Integer.parseInt(DB.getSQLValueString(null, "SELECT MAX(C_OrderB2C_ID) FROM C_ORDERB2C WHERE DocumentoMuro='"+documentno+"'"));
 						PreparedStatement pstmtvl = null; ResultSet rsvl = null;
@@ -617,7 +617,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 							pstmtvl = DB.prepareStatement (sqlvl, null);
 							rsvl = pstmtvl.executeQuery ();
 							if(rsvl.next() && rsvl.getInt("cuenta")>0) {
-								// validar que todas estén para pasar a OV
+								// validar que todas estï¿½n para pasar a OV
 								String sqlvlok= "Select count(*) cuenta from C_OrderB2CLine where PASARAOV<>'Y' and C_OrderB2C_ID=(SELECT MAX(C_OrderB2C_ID) FROM C_ORDERB2C WHERE DocumentoMuro='"+documentno+"')";
 								PreparedStatement pstmtvlok = null; ResultSet rsvlok = null;
 								try {
@@ -665,18 +665,24 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 									                ejecutarSQL(insertOrderLine);
 									                contador++;
 
-									                if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) { //  abre if(M_RequisitionLine_ID!=null)
-									                    String sqlUpRL = "SELECT SUM(QTYENTERED) "
-									                            + " FROM C_OrderLine col"
-									                            + " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
-									                            + " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
-									                    BigDecimal amt = DB.getSQLValueBD(get_TrxName(), sqlUpRL);
-									                    if (amt == null) amt = Env.ZERO; //  if interno
-									                    String update = "UPDATE M_RequisitionLine"
-									                            + " SET QtyUsed = " + amt
-									                            + " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
-									                    ejecutarSQL(update);
-									                } //  cierra if(M_RequisitionLine_ID!=null)
+									                // FIX 2026-07-20 (FG): UPDATE de QtyUsed DESACTIVADO (mismo fix que
+									                // ImportOrderB2CRFAutOdoo 2026-06-09). Escribia solo QtyUsed con formula
+									                // SUM(QtyEntered DR/IP/CO/CL/IN), divergente del ModelValidator
+									                // ModWindsorUpdateReserved y sin ajustar QtyReserved/Qty
+									                // -> dejaba disponible negativo.
+									                // El validator AFTER_COMPLETE de la OV es la unica fuente de verdad.
+									                // if (rslines.getBigDecimal("M_RequisitionLine_ID") != null) { //  abre if(M_RequisitionLine_ID!=null)
+									                //     String sqlUpRL = "SELECT SUM(QTYENTERED) "
+									                //             + " FROM C_OrderLine col"
+									                //             + " INNER JOIN C_Order co ON (col.C_Order_ID = co.C_Order_ID)"
+									                //             + " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID") + " AND co.DocStatus IN ('DR','IP','CO','CL','IN')";
+									                //     BigDecimal amt = DB.getSQLValueBD(get_TrxName(), sqlUpRL);
+									                //     if (amt == null) amt = Env.ZERO; //  if interno
+									                //     String update = "UPDATE M_RequisitionLine"
+									                //             + " SET QtyUsed = " + amt
+									                //             + " WHERE M_RequisitionLine_ID = " + rslines.getBigDecimal("M_RequisitionLine_ID");
+									                //     ejecutarSQL(update);
+									                // } //  cierra if(M_RequisitionLine_ID!=null)
 
 									                String updateOrderB2CLine = "UPDATE C_OrderB2CLine"
 									                        + " SET C_Order_ID = "+orderId+", Processed = 'Y', c_orderline_id = "+orderLineId
@@ -761,7 +767,7 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 						commitEx();
 					}
 					if (errorsl==9) {
-						// sin líneas
+						// sin lï¿½neas
 					}
 
 				} catch(Exception e) {
@@ -784,13 +790,13 @@ public class ProcesarOrdenMuroMashini extends SvrProcess {
 	 * I_OrderB2C. Java 1.6 (sin try-with-resources).
 	 */
 	private void prepararIOrderB2C() {
-		// Validación
+		// Validaciï¿½n
 		if (p_C_Order_ID <= 0) {
 			throw new IllegalArgumentException(
-					"Debe indicar un C_Order_ID válido (>0).");
+					"Debe indicar un C_Order_ID vï¿½lido (>0).");
 		}
 
-		// Limpiar staging solo del BP que usas acá (igual a tu original)
+		// Limpiar staging solo del BP que usas acï¿½ (igual a tu original)
 		ejecutarSQL("DELETE FROM I_OrderB2C WHERE C_BPartner_ID=1001237");
 
 		PreparedStatement pst = null;
